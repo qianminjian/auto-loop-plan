@@ -935,18 +935,151 @@ node scripts/phase-state.js inc-strike <phaseId> <type>
 
 ## Checkpoint Protocol
 
-At these points, pause and display:
+> **Bug-07 修复**:此前协议列 3 个 checkpoint(解析后、Phase 开始前、首次 fix 前),
+> 触发条件重叠 / 模糊:
+> - 用户 `c` 同意"启动 Phase 02"后,要不要再问"Phase 02 开始前"?本次没再问,但协议没明说
+> - 修小 bug 时(2/3 次 fix retry),"后续 fix"按协议**不应**再问 —
+>   orchestrator 怎么知道"是不是首次 fix"?需要跟踪 fix attempt 计数
+>
+> 修复:采用"幂等 token + phase 进入时一次性确认"机制(simple & YAGNI),
+> 比 3 个独立 checkpoint 类型少一套判断逻辑。一次性确认 = 覆盖该 phase
+> 的所有子步骤(execute / audit / fix / gate)。
+
+### 模型:Phase-scoped 一次性确认
+
+phase 进入时一次性确认:
 ```
-[CHECKPOINT] <description>
-Reply: 'c' = continue | 's' = skip | 'a' = abort
+[CHECKPOINT] Phase N/M: <name> — reply 'c' to continue, 's' to skip, 'a' to abort
 ```
 
-Checkpoints:
-1. After plan parsing, before first execution
-2. Before each phase starts
-3. Before first fix attempt (not before retries)
+| 维度 | 规则 |
+|------|------|
+| **触发时机** | phase 从 `pending` 进入子流程(Step 2 Pre-flight)前一次 |
+| **作用域** | 该 phase 全部子步骤:execute / audit / fix / gate |
+| **幂等性** | 同一 phase 一次确认 = 覆盖其所有子步骤;不再询问 |
+| **可恢复** | state.json 记录 `userConfirmations[]`,中断后 `--resume` 时已 confirmed 的 phase 不会重复询问 |
+| **手动放弃** | 用户仍可主动 `s` 跳过 / `a` 终止(per phase 一次) |
 
-Skip all checkpoints when `AUTO_PHASE_NO_CONFIRM=true`.
+### 不在 Phase-scoped 范围(其他类型 checkpoint,独立协议)
+
+- **3-strike checkpoint**(Step 5 / 7 fix loop 失败 ≥3 次)
+  → 问"继续重试 / 跳过 / 终止" — 这是另一类 checkpoint
+- **Manual gate checkpoint**(Bug-06)
+  → 在 `gated` → `awaiting_user_review` 后,问"pass / fail / request-changes / skip" — 独立协议
+- **首次 plan 解析确认**(Step 3 freeform 解析后)
+  → 解析后首次 `c` 不属于任何 phase 的 checkpoint,但同样可以写入 userConfirmations(phaseId='plan')
+
+### fix retry 不触发 checkpoint(关键边界)
+
+```bash
+# Phase 已 confirmed(c / s / a 任一)
+# 后续 fix retry / 重新审计 / 重新跑 gate
+# → 不再询问 checkpoint
+# 原因:该 phase 已被用户"接受",子步骤属于已确认范围
+```
+
+| 场景 | 是否触发 checkpoint |
+|------|---------------------|
+| Phase 进入首次 execute | ✅ 触发(phase 边界) |
+| Phase 内 fix retry(attempt 2) | ❌ 不触发(已 confirmed) |
+| Phase 内 fix retry(attempt 3,3-strike) | ❌ 不触发 3-strike 之前的 checkpoint,但**触发** 3-strike 自己的 checkpoint(继续重试 / 跳过 / 终止) |
+| Phase 内 manual gate 入口 | ❌ 不触发 phase-scoped checkpoint,触发 manual gate checkpoint |
+| `--resume` 恢复已 confirmed phase | ❌ 不再问(state.json 有记录) |
+| `--resume` 恢复未 confirmed phase | ✅ 触发 phase-scoped checkpoint |
+
+### state.json 扩展
+
+顶层新增 `userConfirmations[]` 数组(可选,按需写入):
+
+```jsonc
+{
+  "userConfirmations": [
+    {
+      "phaseId": "01",
+      "scope": "phase-full",         // 固定值,目前只有 phase-full
+      "decidedAt": "2026-06-12T10:30:00Z",
+      "decision": "c"                 // c | s | a
+    }
+  ]
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `phaseId` | string | 阶段 id(2 位数字字符串,如 "01" / "02") |
+| `scope` | string | 固定 `"phase-full"`,覆盖该 phase 所有子步骤 |
+| `decidedAt` | string | ISO 8601 时间戳 |
+| `decision` | string | `c` = 继续 / `s` = 跳过 / `a` = 终止 |
+
+**向后兼容**:旧 state.json 无 `userConfirmations` 字段时视为空数组。
+phase-state.js **不在 init 时**预创建该字段(按需写入,减少 state.json 体积)。
+
+### phase-state.js 命令
+
+| 命令 | 行为 |
+|------|------|
+| `record-confirm <phaseId> <decision>` | 追加 `{phaseId, scope:"phase-full", decidedAt, decision}` 到 `userConfirmations` |
+| `has-confirm <phaseId>` | exit 0 = 已确认(任意 decision) / exit 1 = 未确认 |
+
+`record-confirm` 校验:
+- `decision` 必须严格 ∈ `c | s | a`,非法值 FATAL
+- `phaseId` 必须存在(state.json phases 数组中)
+- 同一 phase 多次 confirm:数组累计(c → s 流转不覆盖,保留历史)
+
+### 环境变量优先级
+
+```bash
+AUTO_PHASE_NO_CONFIRM=true   # 跳过所有 checkpoint(无人值守)
+                              # 优先于 state.json 的 userConfirmations
+                              # 即:即使已 confirm,设此 env 也不再询问(完全无人值守)
+```
+
+### orchestrator 使用示例
+
+```bash
+# 1. phase 进入时,检查是否已确认
+if node scripts/phase-state.js has-confirm <phaseId>; then
+  # 已确认 → 跳过询问,直接执行
+  echo "Phase <phaseId> 已 confirm,直接执行"
+else
+  # 未确认 → 询问用户
+  echo "[CHECKPOINT] Phase N/M: <name> — 'c' 继续 / 's' 跳过 / 'a' 终止"
+  read -r REPLY
+  # 记录用户决策
+  node scripts/phase-state.js record-confirm <phaseId> "$REPLY"
+fi
+
+# 2. phase 内 fix retry:不再询问
+# (has-confirm 已 exit 0,跳过整个询问步骤)
+
+# 3. 3-strike / manual gate:独立 checkpoint,见各自章节
+```
+
+### 反例 vs 正例
+
+```bash
+# ❌ 反例 1:每次 phase 子步骤都询问
+for step in execute audit fix gate; do
+  echo "[CHECKPOINT] $step — c / s / a"
+  read -r
+done
+# 错:重复询问,违反"一次性确认 = 覆盖该 phase 的所有子步骤"
+
+# ❌ 反例 2:不写入 state.json,中断后 --resume 重复问
+echo "[CHECKPOINT] Phase 02 — c / s / a"
+read -r REPLY
+# 错:state.json 没有 userConfirmations,--resume 时会再问一次
+
+# ✅ 正例 1:phase 进入时一次性询问 + 写 state.json
+if ! node scripts/phase-state.js has-confirm 02; then
+  echo "[CHECKPOINT] Phase 02/M: <name> — c / s / a"
+  read -r REPLY
+  node scripts/phase-state.js record-confirm 02 "$REPLY"
+fi
+
+# ✅ 正例 2:fix retry 不询问
+# (Step 5 fix loop 内,不再调 has-confirm / 询问)
+```
 
 ## Progress Display
 

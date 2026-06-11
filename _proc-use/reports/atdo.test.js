@@ -1540,3 +1540,175 @@ describe('Bug-08 lock 持有语义明文化 + unlock 严格化', () => {
     });
   });
 });
+
+// ─── Bug-07 (P2): Checkpoint 协议改 Phase-scoped 幂等 token 回归 ──
+// 症状:原协议列 3 个 checkpoint(解析后 / Phase 开始前 / 首次 fix 前),触发条件
+//      重叠/模糊:
+//        - 用户同意"启动 Phase 02"(第一次 checkpoint)后,要不要再问"Phase 02 开始前"
+//        - fix retry 时,orchestrator 怎么知道"是不是首次 fix"?需跟踪 fix attempt 计数
+// 修复:采用"幂等 token + phase 进入时一次性确认"机制,要点:
+//   1. SKILL.md 重构 Checkpoint 章节,明文"phase-scoped 一次性确认"
+//   2. state.json 顶层新增 userConfirmations[] 数组(每条含 phaseId/scope/decidedAt/decision)
+//   3. phase 进入时检查 userConfirmations,已 confirmed → 跳过询问
+//   4. fix retry / 重新审计 不触发 checkpoint(已确认过)
+//   5. 3-strike / manual gate 是另一类 checkpoint,不在本 scope 内
+//   6. phase-state.js 新增 record-confirm / has-confirm 命令
+describe('Bug-07 Checkpoint 协议 Phase-scoped 幂等 token', () => {
+  const SKILL_PATH = path.join(__dirname, '../../SKILL.md');
+  const skillContent = fs.readFileSync(SKILL_PATH, 'utf8');
+
+  describe('SKILL.md Checkpoint 协议文档', () => {
+    test('SKILL.md 包含 "Phase-scoped" / "一次性确认" / "幂等" checkpoint 协议说明', () => {
+      // 至少包含以下三个关键词之一(任一即可,允许多种中文/英文措辞)
+      // 防止以后编辑把这段关键说明删掉又没人发现
+      const re = /Phase-scoped|phase-scoped|一次性确认|幂\s*等|idempotent/i;
+      assert.match(skillContent, re,
+        'SKILL.md 必须包含 Phase-scoped / 一次性确认 / 幂等 checkpoint 协议说明');
+    });
+
+    test('SKILL.md 包含 userConfirmations state 字段说明', () => {
+      // 必须显式提到 state.json 的 userConfirmations 字段(数组名)
+      assert.match(skillContent, /userConfirmations/,
+        'SKILL.md 必须包含 state.json userConfirmations 字段说明');
+      // 必须配套说明 decision 取值(至少提到 c / s / a 三选一)
+      assert.match(skillContent, /c\s*\|\s*s\s*\|\s*a|'c'|'s'|'a'/,
+        'SKILL.md 必须说明 decision 取值 c|s|a');
+    });
+
+    test('SKILL.md 明确说明 fix retry 不触发 checkpoint', () => {
+      // 必须显式表达"fix retry 不再询问 checkpoint"(关键边界)
+      // 允许的中文措辞:"fix retry 不触发 checkpoint" / "修复 retry 不再问" / "不再询问"
+      // 防止以后编辑把这段关键说明删掉又没人发现
+      const re = /fix\s*retry[\s\S]{0,40}(不\s*触发|不\s*再\s*问|不\s*再\s*询问|不再\s*触发)/i;
+      assert.match(skillContent, re,
+        'SKILL.md 必须明确说明 fix retry 不触发 checkpoint');
+    });
+  });
+
+  describe('phase-state.js record-confirm 命令', () => {
+    let dir;
+    before(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-bug07-'));
+      initPlan(dir, JSON.stringify({ phases: [
+        { number: '01', name: 'a' },
+        { number: '02', name: 'b' },
+      ]}));
+    });
+    after(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+
+    test('record-confirm 合法 decision=c 写入 userConfirmations 数组', () => {
+      const r = runIn(dir, 'record-confirm', '01', 'c');
+      assert.equal(r.code, 0, r.stderr);
+      // state.json 顶层 userConfirmations 应包含本条
+      const state = JSON.parse(runIn(dir, 'get').stdout);
+      assert.ok(Array.isArray(state.userConfirmations), 'userConfirmations 必须是数组');
+      const conf = state.userConfirmations.find(c => c.phaseId === '01');
+      assert.ok(conf, '应找到 phaseId=01 的确认记录');
+      assert.equal(conf.scope, 'phase-full', 'scope 必须固定为 phase-full');
+      assert.equal(conf.decision, 'c', 'decision 必须为 c');
+      assert.ok(conf.decidedAt, 'decidedAt 必须有值');
+    });
+
+    test('record-confirm 合法 decision=s / a 写入', () => {
+      // 清空之前的确认(用独立 dir,避免污染)
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-bug07-rc-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        for (const decision of ['s', 'a']) {
+          const r = runIn(d, 'record-confirm', '01', decision);
+          assert.equal(r.code, 0, `decision=${decision} 应被接受`);
+          const state = JSON.parse(runIn(d, 'get').stdout);
+          const conf = state.userConfirmations.find(c => c.phaseId === '01' && c.decision === decision);
+          assert.ok(conf, `应找到 decision=${decision} 的确认记录`);
+        }
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('record-confirm 非法 decision → FATAL', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-bug07-rc-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        // 非法 decision 列表:大写 / 数字 / 字符串 / 空
+        const bads = ['C', 'continue', '1', 'x', ''];
+        for (const bad of bads) {
+          const r = runIn(d, 'record-confirm', '01', bad);
+          assert.equal(r.code, 1, `非法 decision="${bad}" 应被拒绝`);
+        }
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('record-confirm 同一 phase 多次记录,userConfirmations 数组累计', () => {
+      // 验证幂等性:同一 phase 可被多次 confirm(c → s 流转),不覆盖
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-bug07-rc-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        runIn(d, 'record-confirm', '01', 'c');
+        runIn(d, 'record-confirm', '01', 'a');
+        const state = JSON.parse(runIn(d, 'get').stdout);
+        const confs = state.userConfirmations.filter(c => c.phaseId === '01');
+        assert.equal(confs.length, 2, '同一 phase 多次 confirm,应累计 2 条');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('record-confirm phaseId 不存在 → die', () => {
+      const r = runIn(dir, 'record-confirm', '99', 'c');
+      assert.equal(r.code, 1);
+      assert.match(r.stderr, /不存在/);
+    });
+  });
+
+  describe('phase-state.js has-confirm 命令', () => {
+    let dir;
+    before(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-bug07-'));
+      initPlan(dir, JSON.stringify({ phases: [
+        { number: '01', name: 'a' },
+        { number: '02', name: 'b' },
+      ]}));
+    });
+    after(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+
+    test('已确认 → exit code 0(has-confirm 01)', () => {
+      // 先 confirm 01
+      runIn(dir, 'record-confirm', '01', 'c');
+      // has-confirm 01 应返回 0
+      const r = runIn(dir, 'has-confirm', '01');
+      assert.equal(r.code, 0, `已确认时 has-confirm 应返回 0,实际: ${r.code}, stderr: ${r.stderr}`);
+    });
+
+    test('未确认 → exit code 1(has-confirm 02)', () => {
+      // 02 尚未 confirm
+      const r = runIn(dir, 'has-confirm', '02');
+      assert.equal(r.code, 1, `未确认时 has-confirm 应返回 1,实际: ${r.code}, stderr: ${r.stderr}`);
+    });
+
+    test('向后兼容:旧 state.json 无 userConfirmations → has-confirm 返回 1', () => {
+      // 构造一个没有 userConfirmations 字段的 state.json(模拟旧版)
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-bug07-hc-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        // 手动删除 userConfirmations 字段(模拟旧 state.json)
+        const stateFile = path.join(d, '.phase-execution/state.json');
+        const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+        delete state.userConfirmations;
+        fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), 'utf8');
+        // has-confirm 应视为空数组(向后兼容)
+        const r = runIn(d, 'has-confirm', '01');
+        assert.equal(r.code, 1, '旧 state.json 无 userConfirmations 应返回 1(未确认)');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('已 confirm 任意 decision(c/s/a)均视为已确认', () => {
+      // 验证 has-confirm 看到 c / s / a 都算"已确认"(避免 orchestrator 误以为要重新问)
+      for (const dec of ['c', 's', 'a']) {
+        const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-bug07-hc-'));
+        try {
+          initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+          runIn(d, 'record-confirm', '01', dec);
+          const r = runIn(d, 'has-confirm', '01');
+          assert.equal(r.code, 0, `decision=${dec} 应视为已确认,实际: ${r.code}`);
+        } finally { fs.rmSync(d, { recursive: true, force: true }); }
+      }
+    });
+  });
+});

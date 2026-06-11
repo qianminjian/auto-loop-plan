@@ -11,6 +11,8 @@
  *   node phase-state.js inc-strike <phaseId> <type>  增加 strike 计数
  *   node phase-state.js get-strikes <phaseId>     获取 strike 计数
  *   node phase-state.js record-commit <phaseId> <hash[,hash,...]>  记录 commit hash(支持单 hash 或 comma-separated 多 hash)
+ *   node phase-state.js record-confirm <phaseId> <decision>        追加 userConfirmation(Bug-07,decision: c|s|a)
+ *   node phase-state.js has-confirm <phaseId>                      检查 phase 是否已确认(exit 0=是, 1=否,Bug-07)
  *   node phase-state.js lock                      获取锁
  *   node phase-state.js unlock --reason=<r>       释放锁(Bug-08:必须带 --reason,合法值 all-completed|aborted|alert)
  *   node phase-state.js check-disk                磁盘空间检查
@@ -755,6 +757,59 @@ function cmdUnlock() {
   process.stdout.write(JSON.stringify({ ok: true, reason, at: new Date().toISOString() }));
 }
 
+// ─── userConfirmations (Bug-07) ──────────────────────────
+// 协议:phase-scoped 一次性确认
+//   - record-confirm <phaseId> <decision> 追加 userConfirmation 到 state.json
+//   - has-confirm <phaseId>                 exit 0 = 已确认 / exit 1 = 未确认
+// decision 必须严格 ∈ {c, s, a},非法值 FATAL
+// 同一 phase 多次 confirm:数组累计(不覆盖,保留历史)
+// 旧 state.json 无 userConfirmations 字段时视为空数组(向后兼容)
+const VALID_DECISIONS = ['c', 's', 'a'];
+
+function cmdRecordConfirm() {
+  const state = readState();
+  const phaseId = args[0];
+  const decision = args[1];
+  if (!phaseId) die('record-confirm 需要 phaseId 作为第一个参数');
+  if (!decision) die('record-confirm 需要 decision 作为第二个参数 (c | s | a)');
+  if (!VALID_DECISIONS.includes(decision)) {
+    die(`record-confirm: 无效 decision "${decision}",合法值: ${VALID_DECISIONS.join(' | ')}`);
+  }
+  // phaseId 引用存在性(防止 phaseId 拼写错误时污染 state)
+  if (!state.phases.find(p => p.number === phaseId)) {
+    die(`record-confirm: 阶段 ${phaseId} 不存在`);
+  }
+  // 顶层 userConfirmations 数组(按需创建,init 不预创建)
+  if (!Array.isArray(state.userConfirmations)) state.userConfirmations = [];
+  const entry = {
+    phaseId,
+    scope: 'phase-full',  // 固定值,目前协议只支持 phase-full
+    decidedAt: new Date().toISOString(),
+    decision,
+  };
+  state.userConfirmations.push(entry);
+  state.updatedAt = new Date().toISOString();
+  writeState(state);
+  process.stdout.write(JSON.stringify({ ok: true, ...entry, total: state.userConfirmations.length }));
+}
+
+function cmdHasConfirm() {
+  const state = readState();
+  const phaseId = args[0];
+  if (!phaseId) die('has-confirm 需要 phaseId 作为参数');
+  // 向后兼容:旧 state.json 无 userConfirmations 字段时视为空数组
+  const confirmations = Array.isArray(state.userConfirmations) ? state.userConfirmations : [];
+  const found = confirmations.find(c => c.phaseId === phaseId);
+  if (found) {
+    // 已确认(任意 decision:c / s / a 都算,避免 orchestrator 误以为要重新问)
+    process.stdout.write(JSON.stringify({ confirmed: true, phaseId, decision: found.decision, decidedAt: found.decidedAt }));
+    process.exit(0);
+  } else {
+    process.stdout.write(JSON.stringify({ confirmed: false, phaseId }));
+    process.exit(1);
+  }
+}
+
 // ─── 入口 ────────────────────────────────────────────────
 
 const commands = {
@@ -765,6 +820,8 @@ const commands = {
   'inc-strike': cmdIncStrike,
   'get-strikes': cmdGetStrikes,
   'record-commit': cmdRecordCommit,
+  'record-confirm': cmdRecordConfirm,  // Bug-07
+  'has-confirm': cmdHasConfirm,        // Bug-07
   lock: () => { process.stdout.write(JSON.stringify(acquireLock())); },
   unlock: cmdUnlock,
   'check-disk': () => { process.stdout.write(JSON.stringify(checkDisk())); },
