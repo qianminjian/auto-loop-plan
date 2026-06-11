@@ -266,12 +266,27 @@ Success criteria: {criteria}
 Constraints: Work ONLY in {projectRoot}. Do NOT read .env files. Do NOT output secrets.
 
 After completing your task, output EXACTLY this line:
-[AUTO-EXEC-RESULT: status=SUCCESS|FAILED, files=<count>, tasks_done=<count>, errors=<count>]
+[AUTO-EXEC-RESULT: status=SUCCESS|FAILED, methodology=proxy|real|mixed, files=<count>, tasks_done=<count>, errors=<count>]
 ```
+
+**methodology 字段(强制)— 标识 agent 实际使用的测试/验证方法学:**
+
+| 取值 | 含义 | 典型场景 |
+|------|------|---------|
+| `proxy` | bash 模拟 / mock / fixture / 代理测试(无真实 AI 推理或真实外部 API) | `sleep 0.05s` 模拟 AI 推理、shell 桩函数、固定 JSON fixture |
+| `real` | 真实 AI 推理 / 真实外部 API / 真实代码执行(端到端无替代) | 调 Claude API、跑真实 DB、调用真实第三方服务 |
+| `mixed` | 部分真实部分模拟(必须详细列出哪部分是 proxy) | 真实 DB + mock LLM,真实 API + stub 通知 |
+
+**为什么强制:** proxy 测试不构成 gate 通过的充分证据(Bug-05 教训)。
+agent 必须如实申报,orchestrator 才能识别"proxy 报告冒充 PASS"的情形
+(如 Phase 02 Gate 2 用 `sleep 0.05s` 模拟 AI 推理,报告 §0.1-0.3
+透明承认是 proxy 但仍判 PASS)。
 
 After agent returns:
 - Parse for `[AUTO-EXEC-RESULT: ...]` marker
 - **Marker parsing rules**: Search the ENTIRE agent output for the marker line — it may appear inside code blocks, with leading/trailing whitespace, or after other content. Use: `grep -oP '\[AUTO-EXEC-RESULT:.*?\]'` or equivalent pattern match. If the agent output contains multiple markers (e.g., from restarted sub-agents), use the LAST one.
+- **methodology 字段校验(强制)**:从 marker 提取 `methodology=...`,必须是 `proxy|real|mixed` 之一;缺失或非法值 → 视为 FAILED,触发 fix loop 要求 agent 重报(不静默放行)
+- **proxy 报告处理(Bug-05 核心)**:若 `methodology=proxy` → 暂停 gate 流程,**不允许按 agent 报告的 SUCCESS/PASS 自行通过 gate**;输出警告 "⚠️ Gate X proxy-only, requires human sign-off or real validation",将 phase 标为 INCONCLUSIVE(等同"待人工放行或 real 验证")。**proxy 测试不构成 gate 通过的充分证据**——orchestrator 必须显式要求人工放行(由用户/上游确认)或 agent 重跑 real 验证后,才能进入下一阶段
 - No marker found → treat as AGENT_OUTPUT_INCOMPLETE, retry once with shorter prompt
 - Update state: `executed`
 
@@ -584,6 +599,27 @@ After EVERY agent call, run these independently (not via agent):
 | Diff range sane | `git diff --stat` | changes >0 and <10000 lines |
 | No debug residue | `grep -r 'console\.log\|debugger\|TODO'` | no output |
 | No secret patterns | `grep -rE 'sk-|ghp_|AKIA'` | no output |
+
+> **13. methodology=proxy 报告不得判定 PASS(Trust Nothing 第 13 项 / Bug-05)**
+>
+> 仅检查"文件存在 / 语法过 / diff 范围合理 / 无 debug 残留 / 无密钥"是不够的。
+> Phase 02 Gate 2 的反例(用 `sleep 0.05s` 模拟 AI 推理)显示:**bash 模拟测试在
+> 文件层、语法层、diff 层、debug 层、密钥层 5 个维度上全部 PASS,但实质是
+> proxy 报告冒充 PASS**。orchestrator 没有任何机制识别这一点。
+>
+> **强约束**:
+> - 读到 `[AUTO-EXEC-RESULT: ...]` marker 中 `methodology=proxy` →
+>   **必须显式标 INCONCLUSIVE**,**不允许**让 agent 报告 SUCCESS 自行走 gate
+> - 输出警告: `⚠️ Gate X proxy-only, requires human sign-off or real validation`
+> - 暂停 gate 流程,等待以下任一处理:
+>   - (a) **人工放行**(human sign-off) — 由用户/上游显式确认接受 proxy 证据
+>   - (b) agent 重跑并改为 `methodology=real` 验证(端到端真实执行)
+> - 恢复 gate 流程前,必须把 state.json 中该 phase 状态回退到 `executed`
+>   (而非 `gated` / `completed`),防止误标通关
+> - **proxy 测试不构成 gate 通过的充分证据** — 这是协议硬约束,不是建议
+>
+> 适用范围: Gate Phase 任何包含 `[AUTO-EXEC-RESULT]` marker 的 agent 调用;
+> 含 gsd-executor / gsd-code-reviewer / gsd-integration-checker。
 
 ## Strike (3-Strike Rule)
 

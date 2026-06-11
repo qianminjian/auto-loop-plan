@@ -1114,6 +1114,55 @@ describe('Bug-02 state.json schema 文档 + 错误消息', () => {
   });
 });
 
+// ─── Bug-05 (P1): [AUTO-EXEC-RESULT] 强制 methodology 字段 + Trust Nothing 第 13 项 ──
+// 症状:Phase 02 Gate 2 agent 用 `sleep 0.05s` 模拟 AI 推理(典型 bash proxy benchmark),
+//       报告 §0.1-0.3 透明承认是 proxy,但最终仍判定 "Gate 2: PASS"。
+//       根因:[AUTO-EXEC-RESULT: ...] marker 协议没有 methodology 字段,orchestrator
+//       不知道这是 proxy 报告,无法识别"proxy 报告冒充 PASS"。
+// 修复:
+//   1. SKILL.md 改写 marker 协议,强制 methodology=proxy|real|mixed
+//   2. Trust Nothing 检查清单新增第 13 项:methodology=proxy 不得判定 PASS,
+//      必须显式标 INCONCLUSIVE,要求人工放行或 real 验证
+describe('Bug-05 AUTO-EXEC-RESULT 强制 methodology 字段 + Trust Nothing 第 13 项', () => {
+  const SKILL_PATH = path.join(__dirname, '../../SKILL.md');
+  const skillContent = fs.readFileSync(SKILL_PATH, 'utf8');
+
+  // 测试 1:SKILL.md 文档包含 methodology=proxy|real|mixed 完整说明
+  test('SKILL.md 包含 "methodology=proxy|real|mixed" 完整说明', () => {
+    // 必须同时出现 methodology 关键字和三种取值
+    assert.match(skillContent, /methodology/);
+    // 三种取值必须同时出现(空格允许)
+    assert.match(skillContent, /proxy\s*\|\s*real\s*\|\s*mixed/);
+    // 必须解释 proxy / real / mixed 的语义
+    assert.match(skillContent, /proxy/);
+    assert.match(skillContent, /real/);
+    assert.match(skillContent, /mixed/);
+  });
+
+  // 测试 2:SKILL.md 文档包含 INCONCLUSIVE 或"proxy 不构成 gate 通过"类似明确说明
+  test('SKILL.md 包含 INCONCLUSIVE 或"proxy 不构成 gate 通过"明确说明', () => {
+    // 必须明确"proxy 不构成 gate 通过"或类似说明(关键词同义即可)
+    // 允许的中文/英文措辞:INCONCLUSIVE / proxy 不构成 / proxy 不得 / proxy 不能算 PASS
+    assert.match(
+      skillContent,
+      /INCONCLUSIVE|proxy\s*不构成|proxy\s*不得|proxy\s*不能|proxy\s*不应\s*判定\s*PASS|proxy-only/i
+    );
+  });
+
+  // 测试 3:SKILL.md 文档包含"proxy 测试"或"proxy 报告"相关条款
+  test('SKILL.md 包含"proxy 测试"或"proxy 报告"相关条款', () => {
+    // 必须明确提到"proxy 测试"或"proxy 报告"(中文/英文二选一)
+    // 防止以后编辑把这段关键说明删掉又没人发现
+    assert.match(skillContent, /proxy\s*测试|proxy\s*报告|proxy\s*benchmark|proxy\s*模拟/i);
+  });
+
+  // 测试 4:SKILL.md 文档包含"人工放行"或"human sign-off"流程
+  test('SKILL.md 包含"人工放行"或"human sign-off"流程', () => {
+    // 必须明确"人工放行"或"human sign-off"作为 proxy 报告的处理路径
+    assert.match(skillContent, /人工放行|人工\s*签|人工\s*判定|human\s*sign-off|human\s*override|人工\s*复核/i);
+  });
+});
+
 // ─── Bug-04 (P1): 非 Gate Phase commit 规则明文化 回归 ──
 // 症状:SKILL.md §8 原标题"Git Commit (gate phases only, after all checks pass)"
 //       字面暗示"非 Gate Phase 不允许 commit",但工程实践要求"原子提交"——
