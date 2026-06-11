@@ -173,20 +173,30 @@ function acquireLock() {
   if (fs.existsSync(LOCK_FILE)) {
     const lock = readJSON(LOCK_FILE);
     if (lock) {
-      const isAlive = (() => {
-        try { process.kill(lock.pid, 0); return true; } catch { return false; }
-      })();
-      if (isAlive && lock.hostname === os.hostname()) {
-        // 检查进程是否是 claude
-        try {
-          const cmdline = require('child_process').execSync(`ps -o comm= -p ${lock.pid}`, { encoding: 'utf8', timeout: 2000 }).trim();
-          if (cmdline.includes('claude') || cmdline.includes('node')) {
-            die(`编排器已在运行 (pid ${lock.pid}, 启动于 ${lock.startTime})`);
-          }
-        } catch {}
+      // P1-C: 验证 lock.pid 是正整数,防止恶意 lock 文件触发 execSync 命令注入
+      //      即使将来 process.kill 兜底失效(版本升级/类型放宽),也确保不传字符串到 shell
+      const pidValid = typeof lock.pid === 'number' && Number.isInteger(lock.pid) && lock.pid > 0;
+      if (pidValid) {
+        const isAlive = (() => {
+          try { process.kill(lock.pid, 0); return true; } catch { return false; }
+        })();
+        if (isAlive && lock.hostname === os.hostname()) {
+          // 检查进程是否是 claude/node — 用 execFileSync 不走 shell,参数化传递
+          try {
+            const { execFileSync } = require('child_process');
+            const cmdline = execFileSync('ps', ['-o', 'comm=', '-p', String(lock.pid)], { encoding: 'utf8', timeout: 2000 }).trim();
+            if (cmdline.includes('claude') || cmdline.includes('node')) {
+              die(`编排器已在运行 (pid ${lock.pid}, 启动于 ${lock.startTime})`);
+            }
+          } catch {}
+        } else {
+          // stale lock (PID 已死)或不同主机 — 允许覆盖
+          process.stderr.write(`[phase-state] 检测到残留锁 (pid ${lock.pid} 已不存在)，自动清理\n`);
+        }
+      } else {
+        // pid 无效(损坏或攻击构造) — 静默清理后重新获取
+        process.stderr.write(`[phase-state] 锁文件损坏(pid 无效),自动清理\n`);
       }
-      // stale lock — 允许覆盖
-      process.stderr.write(`[phase-state] 检测到残留锁 (pid ${lock.pid} 已不存在)，自动清理\n`);
     }
   }
   const lock = {
