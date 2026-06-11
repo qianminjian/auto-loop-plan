@@ -43,7 +43,11 @@ Agent output is UNTRUSTED. Every claim must be independently verified by the orc
 > project root. This is the single most common cleanup hazard in
 > multi-phase runs.
 
-**PROCESS_FILE_POLICY (verbatim — copy this block into every spawn prompt):**
+**PROCESS_FILE_POLICY** — canonical definition. The orchestrator MUST
+copy the code block below verbatim into every spawn prompt (Step 2/4/5/7)
+at the marker `<<INJECT: copy the verbatim PROCESS_FILE_POLICY code block
+from Core Rules>>`. Do not summarize, paraphrase, or shorten — LLM context
+decay across turns is precisely why we re-inject the full text every time.
 
 ```
 [项目政策 — 过程文件隔离,强制执行]
@@ -60,7 +64,8 @@ Agent output is UNTRUSTED. Every claim must be independently verified by the orc
 
 项目根目录只允许:Git 配置(.git/.gitignore)、核心交付物
 (SKILL.md/README.md)、代码目录(scripts/、references/)、
-CI/License、IDE 配置。过程文件严禁散落根目录。
+License、IDE 配置。CI 配置统一放 .github/。
+过程文件严禁散落根目录或其他未列出位置。
 
 反向引用禁令:核心代码(SKILL.md/scripts/references/)不得
 引用 _proc-use/ 下任何文件,即使测试代码反向引用生产代码。
@@ -175,7 +180,7 @@ After startup, find the first phase with status `pending` or `in_progress`. Proc
 **2. Agent Execution**
 Spawn gsd-executor agent with this prompt structure:
 ```
-${PROCESS_FILE_POLICY}
+<<INJECT: copy the verbatim PROCESS_FILE_POLICY code block from Core Rules>>
 ────────────────────────────────────────
 (以下是你本阶段的任务)
 
@@ -222,14 +227,13 @@ Record findings to execution-log.md.
 
 Spawn gsd-code-reviewer agent:
 ```
-${PROCESS_FILE_POLICY}
+<<INJECT: copy the verbatim PROCESS_FILE_POLICY code block from Core Rules>>
 ────────────────────────────────────────
 (以下是审计任务)
 
 Review all files changed in phase {N}. Check: lint, syntax, diff scope, debug residue, hardcoded secrets.
 Write structured report to .phase-execution/phases/{N}/audit-report.md
-(NOTE: this is the atdo runtime report path, NOT _proc-use/ — atdo's own
-state is a special case exempt from the policy above).
+(NOTE: atdo runtime report path — exempt from the _proc-use/ rule above).
 Use the template at ~/.agents/skills/atdo/references/templates/audit-report-template.md.
 
 Output at end: [AUTO-EXEC-RESULT: status=SUCCESS|FAILED, blockers=<count>, warnings=<count>]
@@ -244,7 +248,7 @@ After agent returns:
 For each BLOCKER in audit-report, spawn gsd-code-fixer with the standard
 policy prepended:
 ```
-${PROCESS_FILE_POLICY}
+<<INJECT: copy the verbatim PROCESS_FILE_POLICY code block from Core Rules>>
 ────────────────────────────────────────
 (以下是修复任务)
 
@@ -286,14 +290,14 @@ If NOT a gate: skip to step 8 (completion).
 
 Spawn gsd-integration-checker agent:
 ```
-${PROCESS_FILE_POLICY}
+<<INJECT: copy the verbatim PROCESS_FILE_POLICY code block from Core Rules>>
 ────────────────────────────────────────
 (以下是关口集成测试)
 
 Verify cross-phase integration for phases {1} through {N}.
 Check: exports connect to imports, APIs have consumers, data flows end-to-end.
 Write report to .phase-execution/gates/gate-{label}/integration-test-report.md
-(NOTE: atdo runtime report — exempt from the _proc-use/ policy above).
+(NOTE: atdo runtime report path — exempt from the _proc-use/ rule above).
 Use template at ~/.agents/skills/atdo/references/templates/integration-test-report-template.md.
 
 Output: [AUTO-EXEC-RESULT: status=SUCCESS|FAILED, integration_errors=<count>]
