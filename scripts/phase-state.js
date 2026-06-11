@@ -484,6 +484,29 @@ function cmdRecordCommit() {
 
 function cmdSanitize() {
   const filepath = args[0];
+  if (!filepath) die('sanitize 需要文件路径作为参数');
+  // P1-1: 路径白名单——只允许 .phase-execution/ 下的文件
+  // 防止恶意调用读取/改写系统文件(/.ssh/id_rsa、/etc/passwd 等)
+  // macOS 上 /var 是 /private/var 的符号链接,test 可能用未归一化路径:
+  //   cwd = /private/var/.../atdo-test-XXX/
+  //   传入 filepath = /var/.../atdo-test-XXX/.phase-execution/t.txt(未归一化)
+  // 解决:用 realpathSync 归一化两边;文件不存在时回退到 lexical 检查
+  const cwdReal = fs.realpathSync(process.cwd());
+  const stateDirReal = path.join(cwdReal, STATE_DIR);
+  const targetResolved = path.resolve(filepath);
+  if (fs.existsSync(filepath)) {
+    // 文件存在:realpath 归一化后比对(同时拦截 symlink 逃逸)
+    const targetReal = fs.realpathSync(filepath);
+    if (targetReal !== stateDirReal && !targetReal.startsWith(stateDirReal + path.sep)) {
+      die(`sanitize: 目标 ${targetReal} 不在 ${STATE_DIR}/ 内(可能是 symlink 逃逸)`);
+    }
+  } else {
+    // 文件不存在:lexical 检查识别路径穿越(如 .phase-execution/../../etc/passwd)
+    if (targetResolved !== stateDirReal && !targetResolved.startsWith(stateDirReal + path.sep)) {
+      die(`sanitize 仅允许处理 ${STATE_DIR}/ 下的文件(收到: ${filepath}, 解析后: ${targetResolved})`);
+    }
+    die(`文件 ${filepath} 不存在`);
+  }
   if (!fs.existsSync(filepath)) die(`文件 ${filepath} 不存在`);
   const content = fs.readFileSync(filepath, 'utf8');
   const sanitized = sanitize(content);
