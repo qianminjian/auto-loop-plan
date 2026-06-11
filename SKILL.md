@@ -412,7 +412,23 @@ Full test suite only if plan explicitly declares it.
 
 Update state: `fixed → gated`
 
-**8. Git Commit** (gate phases only, after all checks pass)
+**8. Git Commit 规则 (按阶段类型区分)**
+
+> **Bug-04 修复**:此前小节标题 `Git Commit (gate phases only, after all checks pass)`
+> 容易被字面理解为"非 Gate Phase 不允许 commit",与工程实践的"原子提交"原则冲突。
+> 实际现象:Phase 01(非 Gate)agent 内部产生了 3 个原子 commit (`32db291` / `3c79edb` /
+> `078de4c`),这符合"每个 commit 只解决一个问题"的最佳实践,但与协议字面冲突。
+> 根因:协议对"非 Gate Phase 是否允许 agent 内部 commit"模糊。
+> 修复:本节明文区分 **Gate Phase** 与 **非 Gate Phase** 的 commit 责任边界。
+
+### 8.1 Gate Phase (质量关口) — orchestrator 强制在 phase 收尾 commit
+
+- 触发条件:plan 中 `is_gate: true` / `gate: true` / 每隔一个阶段 / **最终阶段恒为 Gate** (Step 6 Gate Detection)
+- commit 时机:Step 7 (Gate Integration Test) 通过后,Step 8 收尾强制 commit
+- commit 主体:**orchestrator**(本协议运行方),不在 agent spawn prompt 中要求 agent commit
+- commit 粒度:1 个 phase = 1 个 commit 块(可能含 agent 内部已产的多个 commit + orchestrator 的 gate summary commit)
+- 安全检查:见下方 §8.3
+- 强制要求:`git add <precise files>`,禁止 `git add -A`
 
 ```bash
 # Security check(覆盖 .env.local / config/.env / id_rsa 等变体,锚定到路径末尾)
@@ -425,21 +441,50 @@ git diff --name-only | grep -iE '(\.env(\.[^/]+)?$|\.pem$|\.key$|id_rsa$|id_dsa$
 # Precise add (NOT git add -A)
 git add <list of expected changed files>
 
-# Commit
+# Commit (orchestrator-only)
 git commit -m "auto-phase: Phase {N} complete [gate:{label}] [audit:passed]"
 
-# Record
-# Bug-03: 支持单 hash 也支持 comma-separated 多 hash(agent 一次产 N 个 commit 场景)
+# Record(支持单 hash 与 comma-separated 多 hash)
+# Bug-03:支持单 hash 也支持 comma-separated 多 hash(agent 一次产 N 个 commit 场景)
 #   例子:node scripts/phase-state.js record-commit 01 32db291,3c79edb,078de4c
 #   - hash 之间用英文逗号分隔,逗号周围的空格会被自动 trim
 #   - 任一 hash 无效 / 末尾悬空逗号 / 列表为空 → FATAL,不部分写入
 node scripts/phase-state.js record-commit <phaseId> <hash[,hash,...]>
 ```
 
-Commit failure handling:
+### 8.2 非 Gate Phase — agent 可在阶段内原子提交,orchestrator 不强制在 phase 收尾再 commit
+
+- 触发条件:plan 中既无 `is_gate` 标记,也不在 Gate Detection 命中的"每 2 个阶段"列表中(且非最终阶段)
+- commit 时机:**agent 内部随时**(完成任务 / 修复 bug / 文档更新),无需等 phase 收尾
+- commit 主体:**agent (gsd-executor / gsd-code-fixer)**,orchestrator 不介入
+- commit 粒度:**原子提交原则** —— 每个 commit 只解决一个问题 / 实现一个功能(参见全局规则 engineering-practices.md §2.1-2.2)
+- orchestrator 在非 Gate Phase 收尾:**不需要 commit**,只需要持久化 state.json (set-phase completed + heartbeat + summary)
+
+**为什么这么设计(对比 "orchestrator 强制在 phase 末尾统一 commit" 的旧理解):**
+
+| 维度 | agent 内部原子提交(当前协议) | orchestrator 末尾统一 commit(旧理解) |
+|------|-----------------------------|-------------------------------------|
+| 粒度 | 细(每 commit 一个变更) | 粗(整 phase 一次 commit) |
+| 回滚粒度 | 精准(bug 只影响 1 个 commit) | 整 phase(可能含多个无关变更) |
+| 代码 review | 易(每个 commit 自解释) | 难(混杂多变更) |
+| 故障恢复 | 好(中间 commit 已落盘) | 差(末尾 commit 失败 = 整 phase 丢失) |
+| git history | 清晰(skill step / fix bug / docs 各自 commit) | 混乱(整 phase 1 commit) |
+
+### 8.3 agent 内部 commit 必须遵守的红线(无论 Gate / 非 Gate)
+
+1. **`git add <precise files>` 精确文件,禁止 `git add -A`**(防止误提交 .env / 临时文件)
+2. **禁止 `git push` / `git push --force` / `git reset --hard`**(参见 Core Rules Red Lines)
+3. **禁止 commit 敏感文件**:.env / .env.*(非 .example/sample/template/dist/default)/ .pem / .key / id_rsa / id_dsa / id_ed25519 / credentials.* / secrets.* (路径末尾锚定)
+4. **commit hash 必须记录到 state.json**:`node scripts/phase-state.js record-commit <phaseId> <hash[,hash,...]>` (Bug-03 支持 comma-separated 多 hash)
+5. **commit message 遵守 Angular 规范**:`<type>(<scope>): <subject>`,type 限于 feat / fix / docs / style / refactor / test / chore / perf / ci / revert / security / hotfix
+6. **每个 commit ≤ 1 个问题/功能**(原子性);如发现一个 commit 含多个独立变更,应 `git reset HEAD~1` 后拆分重新提交
+
+### 8.4 Commit 失败处理(无论 Gate / 非 Gate)
+
 - pre-commit hook rejection → fix hook-reported issues, retry once
 - merge conflict → ALERT.md + exit (do NOT auto-resolve)
 - other errors → ALERT.md + exit
+- agent 内部 commit 失败 → 在 agent prompt 中给出 `[AUTO-EXEC-RESULT: status=FAILED]`,由 orchestrator 触发 fix loop
 
 **9. Phase Completion + Continuation**
 
