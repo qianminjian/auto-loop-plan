@@ -273,7 +273,8 @@ Update state: `fixed → gated`
 # 原 P0:'\.env$' 只匹配字面 .env,会漏掉 .env.local / .env.production / config/.env
 #      'credentials' 无锚定,会误中;id_rsa 无扩展名需单独加
 #      'secrets?' / 'credentials?' 覆盖单/复数;均锚定到路径末尾避免误中
-git diff --name-only | grep -iE '(\.env(\.[^/]+)?$|\.pem$|\.key$|id_rsa$|id_dsa$|id_ed25519$|credentials?\.[^/]+$|secrets?\.[^/]+$)' && echo "SECURITY: sensitive file in diff" && exit 1
+# 白名单:.env.example/sample/template/dist/default 是约定俗成的模板文件,应允许 commit
+git diff --name-only | grep -iE '(\.env(\.[^/]+)?$|\.pem$|\.key$|id_rsa$|id_dsa$|id_ed25519$|credentials?\.[^/]+$|secrets?\.[^/]+$)' | grep -viE '\.env\.(example|sample|template|dist|default)$' && echo "SECURITY: sensitive file in diff" && exit 1
 
 # Precise add (NOT git add -A)
 git add <list of expected changed files>
@@ -379,7 +380,8 @@ node scripts/phase-state.js inc-strike <phaseId> <type>
 ## Secret Leak Prevention
 
 1. Every Agent prompt includes: "Do NOT read .env, .pem, .key, credentials.* files. If you need env vars, reference them without revealing values."
-2. After writing ANY log/report: `node scripts/phase-state.js sanitize <file>`
+2. After writing ANY log/report INSIDE `.phase-execution/`: `node scripts/phase-state.js sanitize <file>`
+   (P1-1 路径白名单:sanitize 只允许处理 `.phase-execution/` 下的文件,防止误改系统文件)
 3. After audit report generation: sanitize the report file
 4. Record all sanitization events to state.json.securityEvents
 
