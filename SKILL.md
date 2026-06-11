@@ -269,8 +269,11 @@ Update state: `fixed → gated`
 **8. Git Commit** (gate phases only, after all checks pass)
 
 ```bash
-# Security check
-git diff --name-only | grep -E '\.env$|\.pem$|\.key$|credentials' && echo "SECURITY: sensitive file in diff" && exit 1
+# Security check(覆盖 .env.local / config/.env / id_rsa 等变体,锚定到路径末尾)
+# 原 P0:'\.env$' 只匹配字面 .env,会漏掉 .env.local / .env.production / config/.env
+#      'credentials' 无锚定,会误中;id_rsa 无扩展名需单独加
+#      'secrets?' / 'credentials?' 覆盖单/复数;均锚定到路径末尾避免误中
+git diff --name-only | grep -iE '(\.env(\.[^/]+)?$|\.pem$|\.key$|id_rsa$|id_dsa$|id_ed25519$|credentials?\.[^/]+$|secrets?\.[^/]+$)' && echo "SECURITY: sensitive file in diff" && exit 1
 
 # Precise add (NOT git add -A)
 git add <list of expected changed files>
