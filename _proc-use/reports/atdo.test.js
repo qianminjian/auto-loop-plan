@@ -1405,3 +1405,138 @@ describe('Bug-06 Manual Gate Protocol 定义 + state schema 扩展', () => {
     });
   });
 });
+
+// ─── Bug-08 (P2): lock 持有语义明文化 + unlock 严格化 回归 ──
+// 症状:Phase 01 完成后 lock 仍持久持有,协议没明确"何时释放"。
+// 修复:
+//   1. SKILL.md Step 1 新增 "Lock 持有语义" 子小节,明文:
+//      - 持有时间:从 atdo 启动 → 所有 phase 完成(unlock 在 phase 间不释放)
+//      - 持有目的:防止并发 /atdo 误启动
+//      - lock 文件状态 ≠ atdo 真实状态(state.json 是 single source of truth)
+//      - unlock 时机清单(all-completed / aborted / alert)
+//   2. phase-state.js 强化 unlock 命令:必须显式 --reason 参数,合法值
+//      all-completed|aborted|alert;无参数 → 拒绝(防止 orchestrator 误调)
+//   3. 默认 reason 也不接受(即使 "alert" 看似最常见,仍要求写明 — 强制确认)
+describe('Bug-08 lock 持有语义明文化 + unlock 严格化', () => {
+  const SKILL_PATH = path.join(__dirname, '../../SKILL.md');
+  const skillContent = fs.readFileSync(SKILL_PATH, 'utf8');
+
+  describe('SKILL.md Lock 持有语义文档', () => {
+    test('SKILL.md 包含 "lock 持续持有" 或 "持有到所有 phase 完成" 等明确说明', () => {
+      // 必须明文表达"lock 从 atdo 启动持续持有 → 所有 phase 完成时 unlock"
+      // 防止以后编辑把这段关键说明删掉又没人发现
+      // 接受多种等价措辞(中文/英文) — markdown 加粗符号 ** 在中文字之间会切断 \s* 匹配,
+      // 因此用 [^X]* 任意非关键字符形式绕过(注意:不要用 \s*|\** 这种 alternation,
+      //      因为 JS regex 在 [\s\*] 中 * 是字面字符,会失败)
+      assert.match(
+        skillContent,
+        /lock\s*持续持有|持续持有.*?所有\s*phase|持有到\s*所有\s*phase\s*完成|lock.*?持有.*?所有\s*phase\s*完成|从\s*atdo\s*启动[\s\S]*?所有\s*phase\s*完成[^才]{0,4}才[^u]{0,4}unlock|atdo\s*启动.*?持有/i
+      );
+      // 必须明确"不在 phase 间释放"(杜绝真空期)
+      assert.match(
+        skillContent,
+        /不.*?在\s*phase\s*间\s*释放|不在\s*phase\s*间\s*释放|不\s*在\s*phase\s*间\s*释放/
+      );
+    });
+
+    test('SKILL.md 包含 unlock 时机清单 (all-completed / aborted / alert)', () => {
+      // 必须明确列出三个合法 unlock 时机(防止 orchestrator 误判)
+      assert.match(skillContent, /all-completed/);
+      assert.match(skillContent, /aborted/);
+      assert.match(skillContent, /alert/);
+      // 必须明文"禁止在 phase 间释放"(方案 A 关键约束)
+      assert.match(skillContent, /禁止.*?释放|禁止.*?unlock/);
+    });
+  });
+
+  describe('phase-state.js unlock --reason 严格化', () => {
+    let dir;
+    before(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-bug08-')); });
+    after(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+
+    function freshLockDir() {
+      // 每个 test 用独立 dir,避免 lock 状态相互干扰
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-bug08-unlock-'));
+      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+      // 先获取 lock(后续 unlock 才有对象可释放)
+      runIn(d, 'lock');
+      return d;
+    }
+
+    test('unlock 无参数 → 拒绝(防止 orchestrator 误调)', () => {
+      const d = freshLockDir();
+      try {
+        const r = runIn(d, 'unlock');
+        assert.equal(r.code, 1, 'unlock 无参数应被拒绝');
+        // 错误消息必须显式提到"必须显式带 --reason"
+        assert.match(r.stderr, /unlock\s*必须\s*显式\s*带\s*--reason/);
+        // 必须列出合法 reason 清单
+        assert.match(r.stderr, /all-completed\s*\|\s*aborted\s*\|\s*alert/);
+        // lock 文件不应被释放(原文件应仍存在)
+        assert.ok(
+          fs.existsSync(path.join(d, '.phase-execution/lock')),
+          'unlock 失败后 lock 文件应仍存在(防止误释放)'
+        );
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('unlock --reason=alert(默认 reason)仍要求显式确认 → 通过但写明 reason', () => {
+      const d = freshLockDir();
+      try {
+        const r = runIn(d, 'unlock', '--reason=alert');
+        assert.equal(r.code, 0, r.stderr);
+        // 必须 echo 写明 reason
+        assert.match(r.stdout, /"reason":\s*"alert"/);
+        // 审计记录到 stderr
+        assert.match(r.stderr, /unlock reason=alert/);
+        // lock 文件应被释放
+        assert.ok(
+          !fs.existsSync(path.join(d, '.phase-execution/lock')),
+          'unlock 成功后 lock 文件应被删除'
+        );
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('unlock --reason=all-completed → 正常完成场景', () => {
+      const d = freshLockDir();
+      try {
+        const r = runIn(d, 'unlock', '--reason=all-completed');
+        assert.equal(r.code, 0, r.stderr);
+        assert.match(r.stdout, /"reason":\s*"all-completed"/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('unlock --reason=aborted → 用户显式终止场景', () => {
+      const d = freshLockDir();
+      try {
+        const r = runIn(d, 'unlock', '--reason=aborted');
+        assert.equal(r.code, 0, r.stderr);
+        assert.match(r.stdout, /"reason":\s*"aborted"/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('unlock --reason=foo (非法 reason) → 拒绝', () => {
+      const d = freshLockDir();
+      try {
+        const r = runIn(d, 'unlock', '--reason=foo');
+        assert.equal(r.code, 1, '非法 reason 应被拒绝');
+        assert.match(r.stderr, /无效\s*reason|合法\s*reason/);
+        // lock 文件不应被释放
+        assert.ok(
+          fs.existsSync(path.join(d, '.phase-execution/lock')),
+          '非法 reason unlock 失败后 lock 文件应仍存在'
+        );
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('unlock --reason (空值) → 拒绝', () => {
+      const d = freshLockDir();
+      try {
+        // --reason= 形式(空 reason)
+        const r = runIn(d, 'unlock', '--reason=');
+        assert.equal(r.code, 1, '--reason= 空值应被拒绝');
+        assert.match(r.stderr, /--reason\s*必须\s*有值|合法\s*reason/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+  });
+});

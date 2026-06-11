@@ -134,6 +134,55 @@ node scripts/phase-state.js lock
 - Active lock (pid alive + matching startTime): report and exit.
 - PID reused (startTime mismatch): clean and create new.
 
+#### Lock 持有语义 (Bug-08)
+
+> **背景**:本会话 Phase 01 完成后 lock 仍持久持有(协议没明确"何时释放")。
+> 两种合理解读都讲得通——本协议**显式选择方案 A(持久持有)**,理由见下。
+> 后续重构者请勿擅自改为"phase 间释放",否则会引入并发 /atdo 误启动风险。
+
+**1. 持有时间**:**从 atdo 启动 → 所有 phase 完成时**才 unlock。
+- **不**在 phase 间释放(杜绝并发实例误启动的真空期)。
+- **不**在单个 phase 完成后释放(state.json 是真实状态,lock 文件只表达"有人正在跑")。
+
+**2. 持有目的**:**防止并发 `/atdo` 实例误启动**。
+- 并发 /atdo 不会因为"lock 文件还在"而拒绝启动,但它会**读取到不完整的 state.json**(phase 1 在 in_progress 而非 completed)导致游标错乱。
+- lock 文件是粗粒度的"独占信号";phase 真实状态由 `state.json` 表达(single source of truth)。
+
+**3. lock 文件状态 ≠ atdo 真实状态**:
+- `state.json.currentPhaseIndex` + `phase.status` = atdo 真实状态
+- `.phase-execution/lock` 只表达"**有进程声称在跑 atdo**"
+- 即使 lock 文件长期存在 ≠ atdo 一直没结束——通过 state.json 心跳 / 进度 / phase 状态判断真实进展
+
+**4. stale lock 处理**(已实现,文档化):
+- 检测到 lock.pid 不存在 → stderr WARN + 自动清理 + 重建新锁
+- 检测到 lock.pid 存在但 startTime 与当前进程不匹配 → 视为 PID 复用,清理 + 重建
+- 检测到 lock.pid 注入攻击字符串 / 负数 / 浮点 / null → 静默清理 + 重建(P1-C 加固)
+
+**5. lock 持有超过 24h**:
+- 警告但需人工确认(不自动释放)
+- 24h 后若 lock 仍存在 → 编排器应输出警告到 stderr,但**不会自动 unlock**
+- 由用户决定是否手动 `unlock --reason=aborted`
+
+**6. lock 释放时机(unlock 严格化,Bug-08 修复)**:
+- ✅ **允许** unlock 的场景(必须显式 `--reason` 参数):
+  - 所有 phase 已 `completed` → `unlock --reason=all-completed` (Step 9 收尾)
+  - 用户显式终止(协议中 "aborted" 分支)→ `unlock --reason=aborted`
+  - 3-strike ALERT 触发 → `unlock --reason=alert`
+- ❌ **禁止**在以下情况 unlock:
+  - 单个 phase 完成后
+  - phase 处于 `in_progress` / `executed` / `audited` / `fixed` / `gated` 任何中间态
+  - 任意时刻"觉得不再需要 lock"就释放
+
+**7. 默认 reason + 显式确认**:
+- `unlock` 无参数 → 拒绝(防止 orchestrator 误调)
+- `unlock --reason=alert` → 默认 reason,仍要求显式确认(强制写明)
+- 防止"误以为 unlock 是无害操作"的认知陷阱
+
+**8. 反例(常见误读)**:
+- ❌ "Phase 01 完成了,应该释放 lock 让 Phase 02 重新获取" → 错。同一 atdo 实例不应释放自己的 lock,会引入并发真空期。
+- ❌ "lock 存在超过 1 小时说明 atdo 卡住了" → 错。lock 只是"有人在跑",真实进展看 state.json。
+- ❌ "调用 unlock 不带 --reason 是默认行为" → 错。Bug-08 起 unlock 必须带显式 reason,防止误释放。
+
 ### Step 2: State Loading
 If `--resume`: read state.json, skip plan parsing, go to Execution Loop.
 Otherwise: parse plan → show at checkpoint → wait for confirmation → write state.json.
@@ -743,7 +792,7 @@ find .phase-execution/phases/<phaseId> -maxdepth 1 -name '*.log' -exec mv {} .ph
 **If this was the last phase:**
 - Output final report
 - Display: "All {N} phases complete. Changes committed locally. Review and push manually: `git push origin <branch>`"
-- Release lock: `node scripts/phase-state.js unlock`
+- Release lock: `node scripts/phase-state.js unlock --reason=all-completed` (Bug-08:必须显式 reason,见 Step 1 "Lock 持有语义")
 
 **If more phases remain:**
 - Call the **CronCreate** tool (NOT ScheduleWakeup — that requires /loop
@@ -927,7 +976,8 @@ node ~/.agents/skills/atdo/scripts/phase-state.js record-commit <id> <h[,h,...]>
 node ~/.agents/skills/atdo/scripts/phase-state.js summary                 # State summary
 
 # Safety
-node ~/.agents/skills/atdo/scripts/phase-state.js lock / unlock           # Concurrency control
+node ~/.agents/skills/atdo/scripts/phase-state.js lock                                                      # 获取锁
+node ~/.agents/skills/atdo/scripts/phase-state.js unlock --reason=all-completed|aborted|alert            # 释放锁(Bug-08)
 node ~/.agents/skills/atdo/scripts/phase-state.js check-disk              # Disk space check
 node ~/.agents/skills/atdo/scripts/phase-state.js sanitize <file>         # Redact secrets
 node ~/.agents/skills/atdo/scripts/phase-state.js heartbeat <p> <t> <s>   # Write heartbeat

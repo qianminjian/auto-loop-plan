@@ -12,7 +12,7 @@
  *   node phase-state.js get-strikes <phaseId>     获取 strike 计数
  *   node phase-state.js record-commit <phaseId> <hash[,hash,...]>  记录 commit hash(支持单 hash 或 comma-separated 多 hash)
  *   node phase-state.js lock                      获取锁
- *   node phase-state.js unlock                    释放锁
+ *   node phase-state.js unlock --reason=<r>       释放锁(Bug-08:必须带 --reason,合法值 all-completed|aborted|alert)
  *   node phase-state.js check-disk                磁盘空间检查
  *   node phase-state.js sanitize <file>           脱敏文件中的密钥
  *   node phase-state.js heartbeat                 写入心跳
@@ -711,6 +711,50 @@ function cmdSummary() {
   }));
 }
 
+// ─── unlock 严格化 (Bug-08) ────────────────────────────────
+// 协议:lock 从 atdo 启动持续持有 → 所有 phase completed 时才 unlock
+// unlock 必须显式带 --reason 参数,防止 orchestrator 误调
+// 合法 reason 列表:
+//   - all-completed:所有 phase 走完,正常完成(Step 9 收尾)
+//   - aborted       :用户显式终止('a' at checkpoint / external kill)
+//   - alert         :3-strike ALERT 触发,必须释放以让用户介入
+// 任何不在此列表的 reason / 不带 --reason → FATAL
+// (unlock 是不可逆的危险操作,严防误释放)
+const UNLOCK_REASONS = ['all-completed', 'aborted', 'alert'];
+
+function cmdUnlock() {
+  // args 形如: ['--reason=alert'] / ['--reason', 'alert'] / [] (拒绝)
+  // 复用 cmdIncStrike 的同样模式:严格白名单 + 显式确认
+  // Bug-08:unlock 必须显式带 --reason 参数,即使 "alert" 看似最常见,也要求写明
+  const VALID = /^--reason(?:=([a-z-]+))?$/;
+  let reason = null;
+  for (const a of args) {
+    const m = a.match(VALID);
+    if (!m) continue;
+    if (!m[1]) {
+      die(`unlock: --reason 必须有值,合法 reason: ${UNLOCK_REASONS.join(' | ')}`);
+    }
+    if (!UNLOCK_REASONS.includes(m[1])) {
+      die(`unlock: 无效 reason "${m[1]}",合法 reason: ${UNLOCK_REASONS.join(' | ')}`);
+    }
+    reason = m[1];
+    break;
+  }
+  if (!reason) {
+    die(`unlock 必须显式带 --reason 参数。合法 reason: ${UNLOCK_REASONS.join(' | ')}
+例: unlock --reason=all-completed
+    unlock --reason=aborted
+    unlock --reason=alert
+原因:unlock 是不可逆的危险操作,lock 从 atdo 启动持续持有直到所有 phase 完成
+     释放 lock 意味着允许并发 /atdo 实例启动,引入 state.json 游标错乱风险
+     显式 --reason 强制 orchestrator 写明释放原因,防止"以为是无害操作"误调`);
+  }
+  releaseLock();
+  // 写一条审计记录到 stderr(便于 watchdog / 调试追溯"谁在何时为什么 unlock")
+  process.stderr.write(`[phase-state] unlock reason=${reason} at ${new Date().toISOString()}\n`);
+  process.stdout.write(JSON.stringify({ ok: true, reason, at: new Date().toISOString() }));
+}
+
 // ─── 入口 ────────────────────────────────────────────────
 
 const commands = {
@@ -722,7 +766,7 @@ const commands = {
   'get-strikes': cmdGetStrikes,
   'record-commit': cmdRecordCommit,
   lock: () => { process.stdout.write(JSON.stringify(acquireLock())); },
-  unlock: () => { releaseLock(); process.stdout.write(JSON.stringify({ ok: true })); },
+  unlock: cmdUnlock,
   'check-disk': () => { process.stdout.write(JSON.stringify(checkDisk())); },
   sanitize: cmdSanitize,
   heartbeat: () => { writeHeartbeat(args[0], args[1], args[2]); process.stdout.write(JSON.stringify({ ok: true })); },
