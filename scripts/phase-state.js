@@ -231,7 +231,13 @@ function checkDisk(minMB = 500) {
 
 // ─── 心跳 ───────────────────────────────────────────────
 
+const HEARTBEAT_STATUSES = ['active', 'paused', 'completed', 'failed'];
+
 function writeHeartbeat(phaseId, taskId, status) {
+  // P2-C: status 白名单(防止 LLM 传 "RUNNING"/"完成" 等异体字符串,让 watchdog 误判)
+  if (status !== undefined && status !== null && status !== '' && !HEARTBEAT_STATUSES.includes(status)) {
+    die(`heartbeat status 无效: "${status}",有效值: ${HEARTBEAT_STATUSES.join(', ')}`);
+  }
   ensureDir();
   const hb = {
     timestamp: new Date().toISOString(),
@@ -258,20 +264,40 @@ function cmdInit() {
   } catch {
     die('init 需要有效的 JSON 输入（通过 stdin 或第一个参数传入）');
   }
-  const phases = (plan.phases || []).map((p, i) => ({
-    number: String(i + 1).padStart(2, '0'),
-    name: p.name || p.id || `Phase ${i + 1}`,
-    goal: p.goal || '',
-    tasks: p.tasks || [],
-    successCriteria: p.success_criteria || [],
-    dependsOn: p.depends_on || p.requires || [],
-    isGate: p.is_gate !== undefined ? p.is_gate : (p.gate !== undefined ? p.gate : false),
-    status: 'pending',
-    commitHash: null,
-    startedAt: null,
-    completedAt: null,
-    statusSince: null,
-  }));
+  // P2-D: 长度限制(name/goal/tasks 防止 DoS — 单 init 把 state.json 撑到 MB 级)
+  const NAME_MAX = 200;
+  const GOAL_MAX = 2000;
+  const TASKS_MAX = 50;
+  const TASK_LEN_MAX = 500;
+  const phases = (plan.phases || []).map((p, i) => {
+    const name = p.name || p.id || `Phase ${i + 1}`;
+    if (typeof name !== 'string') die(`阶段 ${i + 1} name 必须是字符串`);
+    if (name.length > NAME_MAX) die(`阶段 ${i + 1} name 长度 ${name.length} > ${NAME_MAX}`);
+    const goal = p.goal || '';
+    if (typeof goal !== 'string') die(`阶段 ${i + 1} goal 必须是字符串`);
+    if (goal.length > GOAL_MAX) die(`阶段 ${i + 1} goal 长度 ${goal.length} > ${GOAL_MAX}`);
+    const tasks = p.tasks || [];
+    if (!Array.isArray(tasks)) die(`阶段 ${i + 1} tasks 必须是数组`);
+    if (tasks.length > TASKS_MAX) die(`阶段 ${i + 1} tasks 数量 ${tasks.length} > ${TASKS_MAX}`);
+    for (const t of tasks) {
+      if (typeof t !== 'string') die(`阶段 ${i + 1} task 必须是字符串`);
+      if (t.length > TASK_LEN_MAX) die(`阶段 ${i + 1} task 长度 > ${TASK_LEN_MAX}`);
+    }
+    return {
+      number: String(i + 1).padStart(2, '0'),
+      name,
+      goal,
+      tasks,
+      successCriteria: p.success_criteria || [],
+      dependsOn: p.depends_on || p.requires || [],
+      isGate: p.is_gate !== undefined ? p.is_gate : (p.gate !== undefined ? p.gate : false),
+      status: 'pending',
+      commitHash: null,
+      startedAt: null,
+      completedAt: null,
+      statusSince: null,
+    };
+  });
 
   if (phases.length === 0) die('plan 中未找到任何阶段。请检查计划文件格式是否正确。');
 
@@ -364,6 +390,12 @@ function cmdSetPhase() {
   }
   const phase = state.phases.find(p => p.number === phaseId);
   if (!phase) die(`阶段 ${phaseId} 不存在`);
+  const idx = state.phases.indexOf(phase);
+  // P2-A: 状态机一致性 — 不允许把"未来"阶段直接 completed
+  // LLM 幻觉或乱序调用会导致 phase X 已 completed 但游标未前进,后续逻辑错乱
+  if (status === 'completed' && idx > state.currentPhaseIndex) {
+    die(`阶段 ${phaseId} 不是当前阶段(游标在 ${state.phases[state.currentPhaseIndex]?.number || '?'}),不能直接 completed`);
+  }
   phase.status = status;
   phase.updatedAt = new Date().toISOString();
   phase.statusSince = new Date().toISOString();
@@ -371,7 +403,6 @@ function cmdSetPhase() {
   if (status === 'completed') {
     phase.completedAt = new Date().toISOString();
     // 单调推进:completed 时把游标推到下一阶段
-    const idx = state.phases.indexOf(phase);
     if (idx === state.currentPhaseIndex && idx + 1 < state.phases.length) {
       state.currentPhaseIndex = idx + 1;
     }
@@ -387,12 +418,17 @@ function cmdGetCurrentPhase() {
   // 单调推进:从 currentPhaseIndex 位置开始,找第一个 status !== 'completed' 的阶段
   // 编排器每完成一阶段调用 set-phase ... completed,游标才前进
   // 中间态(executed/audited/fixed/gated)被识别为"还在做",不前进游标
+  // P2-E: 只在游标实际变化时写盘(性能优化 — 5 次 get 不再触发 5 次备份轮转)
   const startIdx = state.currentPhaseIndex || 0;
   let phase = null;
+  let cursorChanged = false;
   for (let i = startIdx; i < state.phases.length; i++) {
     if (state.phases[i].status !== 'completed') {
       phase = state.phases[i];
-      state.currentPhaseIndex = i;
+      if (i !== state.currentPhaseIndex) {
+        state.currentPhaseIndex = i;
+        cursorChanged = true;
+      }
       break;
     }
   }
@@ -402,7 +438,7 @@ function cmdGetCurrentPhase() {
     return;
   }
 
-  writeState(state);
+  if (cursorChanged) writeState(state);
   process.stdout.write(JSON.stringify({
     number: phase.number,
     name: phase.name,
@@ -421,10 +457,19 @@ function cmdIncStrike() {
   // rawType 用于校验是否传了空串;type 用于实际写入,默认 execution
   const rawType = args[1];
   const type = rawType || 'execution';
-  // 参数校验:phaseId 必须存在,type 不能是空字符串
+  // 参数校验:phaseId 必须存在,type 必须符合规范
   if (!phaseId) die('inc-strike 需要 phaseId 作为第一个参数');
-  if (rawType !== undefined && (typeof rawType !== 'string' || rawType.trim() === '')) {
-    die('inc-strike type 不能为空字符串');
+  if (rawType !== undefined) {
+    if (typeof rawType !== 'string' || rawType.trim() === '') {
+      die('inc-strike type 不能为空字符串');
+    }
+    // P2-B: type 严格白名单(防止 LLM 幻觉写 "../../../etc/passwd" / emoji / 超长字符串)
+    if (rawType.length > 32) {
+      die(`inc-strike type 长度 ${rawType.length} > 32`);
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(rawType)) {
+      die(`inc-strike type 只能含字母/数字/-/_,收到: "${rawType}"`);
+    }
   }
   // phaseId 引用存在性(防止 phaseRetry[undefined]={} 污染 state)
   if (!state.phases.find(p => p.number === phaseId)) die(`inc-strike: 阶段 ${phaseId} 不存在`);
@@ -517,7 +562,7 @@ function cmdSanitize() {
     }
     die(`文件 ${filepath} 不存在`);
   }
-  if (!fs.existsSync(filepath)) die(`文件 ${filepath} 不存在`);
+  // 到这里文件必然存在(P2-F: 删掉冗余的二次 existsSync 检查)
   const content = fs.readFileSync(filepath, 'utf8');
   const sanitized = sanitize(content);
   if (sanitized !== content) {
