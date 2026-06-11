@@ -40,9 +40,57 @@ const PROGRESS_FILE = path.join(STATE_DIR, 'progress.md');
 const ALERT_FILE = path.join(STATE_DIR, 'ALERT.md');
 
 // 阶段状态白名单(set-phase 校验,getCurrentPhase 识别)—— 与 SKILL.md 协议保持同步
-const VALID_STATUSES = ['pending', 'in_progress', 'executed', 'audited', 'fixed', 'gated', 'completed'];
-const ACTIVE_STATUSES = ['pending', 'in_progress', 'executed', 'audited', 'fixed', 'gated'];
+const VALID_STATUSES = [
+  'pending', 'in_progress', 'executed', 'audited', 'fixed', 'gated', 'completed',
+  // Bug-06:manual gate 专用中间态(见 SKILL.md "Manual Gate Protocol")
+  'awaiting_user_review', 'user-review-pass', 'user-review-fail',
+];
+const ACTIVE_STATUSES = ['pending', 'in_progress', 'executed', 'audited', 'fixed', 'gated', 'awaiting_user_review'];
 const STRIKE_THRESHOLDS = { phaseRetry: 3, regression: 2, sameCategory: 5 };
+
+// Bug-06:状态机合法转换表
+//   - 每个阶段的 status 只能从一组特定的来源状态进入
+//   - 跳过任何状态 → FATAL(防止 LLM 幻觉或乱序调用导致状态错乱)
+//   - 任何不在此表中的 (from, to) 组合都被视为非法
+//   - 注:'pending' 作为起点,不校验来源(set-phase 不会主动把任意状态 → pending)
+const ALLOWED_TRANSITIONS = {
+  // 标准自动流程
+  'pending':              ['in_progress'],
+  'in_progress':          ['executed'],
+  'executed':             ['audited'],
+  'audited':              ['fixed'],
+  'fixed':                ['gated'],
+  'gated':                ['completed', 'awaiting_user_review'],  // auto → completed;manual → awaiting_user_review
+  // Bug-06:manual gate 流程(gated 进入 manual gate 后必须经此路径离开)
+  'awaiting_user_review': ['user-review-pass', 'user-review-fail'],
+  'user-review-pass':     ['completed'],
+  // 'user-review-fail' 终态:失败 ALERT,不向其他状态转换
+  // 'completed' 终态:不向其他状态转换
+};
+
+// 反向索引:任何状态只能从 ALLOWED_TRANSITIONS[X] 中来(快速查询)
+const VALID_PREDECESSORS = (() => {
+  const map = {};
+  for (const [from, targets] of Object.entries(ALLOWED_TRANSITIONS)) {
+    for (const t of targets) {
+      if (!map[t]) map[t] = [];
+      map[t].push(from);
+    }
+  }
+  return map;
+})();
+
+// 终态:不允许 set-phase 离开这些状态
+const TERMINAL_STATUSES = ['completed', 'user-review-fail'];
+
+// 把合法转换表格式化为可读字符串(供 FATAL 消息使用)
+function formatTransitionTable() {
+  const lines = [];
+  for (const [from, targets] of Object.entries(ALLOWED_TRANSITIONS)) {
+    lines.push(`  ${from} → ${targets.join(' | ') || '(终态)'}`);
+  }
+  return lines.join('\n');
+}
 
 // ─── 工具函数 ───────────────────────────────────────────
 
@@ -291,6 +339,12 @@ function cmdInit() {
       successCriteria: p.success_criteria || [],
       dependsOn: p.depends_on || p.requires || [],
       isGate: p.is_gate !== undefined ? p.is_gate : (p.gate !== undefined ? p.gate : false),
+      // Bug-06:gate 类型标识 — auto / manual / hybrid
+      //   auto:   agent 全自动通过(默认,向后兼容)
+      //   manual: 必须用户判断,orchestrator 暂停 + AskUserQuestion
+      //   hybrid: agent 报告 + orchestrator 自动化检查 + 用户最终签字
+      // 输入字段:gate_type(下划线,plan 风格) / gateType(camelCase)
+      gateType: p.gate_type || p.gateType || 'auto',
       status: 'pending',
       commits: [],
       commitHash: null,  // 兼容字段:最后一个 commit 的 hash(单 hash 场景与多 hash 场景共用)
@@ -399,6 +453,27 @@ function cmdSetPhase() {
   if (status === 'completed' && idx > state.currentPhaseIndex) {
     die(`阶段 ${phaseId} 不是当前阶段(游标在 ${state.phases[state.currentPhaseIndex]?.number || '?'}),不能直接 completed`);
   }
+  // Bug-06: 状态机合法性校验 — 不允许跳过中间状态
+  // 例:pending → completed 跳过 in_progress/executed/audited/fixed/gated → FATAL
+  // 任何不在 ALLOWED_TRANSITIONS 中的 (from, to) 组合都拒绝
+  // 例外 1:同状态(status === currentStatus)视为幂等,允许(避免 orchestrator 重复 set-phase 时误报)
+  // 例外 2:currentStatus === 'pending' 视为起点(没有前任),仅校验目标在 ALLOWED_TRANSITIONS['pending'] 中
+  const currentStatus = phase.status;
+  if (currentStatus !== status) {  // 同状态短路
+    const allowed = VALID_PREDECESSORS[status] || [];
+    if (!allowed.includes(currentStatus)) {
+      die(`阶段 ${phaseId} 状态非法转换: "${currentStatus}" → "${status}"。
+
+允许的转换表:
+${formatTransitionTable()}
+
+提示:从 "${currentStatus}" 只能转换到: ${(ALLOWED_TRANSITIONS[currentStatus] || ['(终态,不可再转)']).join(', ')}`);
+    }
+  }
+  // 终态保护:'completed' / 'user-review-fail' 不可再转换
+  if (TERMINAL_STATUSES.includes(currentStatus) && currentStatus !== status) {
+    die(`阶段 ${phaseId} 已是终态 "${currentStatus}",不可再转换。终态列表: ${TERMINAL_STATUSES.join(', ')}`);
+  }
   phase.status = status;
   phase.updatedAt = new Date().toISOString();
   phase.statusSince = new Date().toISOString();
@@ -408,6 +483,20 @@ function cmdSetPhase() {
     // 单调推进:completed 时把游标推到下一阶段
     if (idx === state.currentPhaseIndex && idx + 1 < state.phases.length) {
       state.currentPhaseIndex = idx + 1;
+    }
+  }
+  // Bug-06: 顶层 awaiting_user_review 字段(可选,manual gate 进行时存在,清理由下次 set-phase 完成态触发)
+  if (status === 'awaiting_user_review') {
+    state.awaiting_user_review = {
+      phaseId,
+      askedAt: new Date().toISOString(),
+      // optionsShown 由 orchestrator 在 AskUserQuestion 中提供,这里不强制结构
+      optionsShown: ['pass', 'fail', 'request-changes', 'skip'],
+    };
+  } else if (status === 'user-review-pass' || status === 'user-review-fail' || status === 'completed') {
+    // 离开 manual gate:清除顶层标记(仅当当前顶层就是本 phase 时,避免误清其他 phase 的标记)
+    if (state.awaiting_user_review && state.awaiting_user_review.phaseId === phaseId) {
+      delete state.awaiting_user_review;
     }
   }
   state.updatedAt = new Date().toISOString();

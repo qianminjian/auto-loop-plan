@@ -501,6 +501,225 @@ node scripts/phase-state.js record-commit <phaseId> <hash[,hash,...]>
 - other errors → ALERT.md + exit
 - agent 内部 commit 失败 → 在 agent prompt 中给出 `[AUTO-EXEC-RESULT: status=FAILED]`,由 orchestrator 触发 fix loop
 
+### Manual Gate Protocol (Bug-06)
+
+> **背景**:Gate 3 等场景是"人工对比多篇资产"——这是**用户判断**,agent 不可代理。
+> 此前的协议(§7 Gate Integration Test)只覆盖 auto gate(Gate Integration Test 由 gsd-integration-checker 跑)。
+> Manual gate 没有协议,orchestrator 只能临时拼凑 AskUserQuestion,流程是 ad-hoc。
+> 本节**显式定义 manual gate 协议**,让 orchestrator 不再即兴发挥。
+
+**核心问题**:§8.4 之后的 §9 "Phase Completion + Continuation" 假设 gate 总能 auto 通过。
+但有些 gate 的"pass/fail"判断**只有人能做**(例:Gate 3 人工对比 02/03/10 三篇资产的一致性、主观质量)。
+agent 跑 proxy 测试无法构成充分证据,LLM 自身判断也不可信。
+
+**1. `gateType` 字段**(phase schema 扩展)
+
+```jsonc
+{
+  "phases": [
+    { "name": "Phase 01", "tasks": ["..."] },                                        // 默认 auto
+    { "name": "Gate 1",   "is_gate": true,                       "gateType": "auto" },
+    { "name": "Gate 2",   "is_gate": true, "gate_type": "manual", "tasks": ["人工对比 02/03/10 三篇资产"] },
+    { "name": "Gate 3",   "is_gate": true, "gate_type": "hybrid" }
+  ]
+}
+```
+
+| 取值 | 含义 | orchestrator 行为 |
+|------|------|------------------|
+| `auto`(默认) | agent 全自动通过(原协议) | 跑 Gate Integration Test,orchestrator 决定 |
+| `manual` | 必须用户判断 | §7 完成后**暂停**,等待 `AskUserQuestion`,agent 报告仅作背景信息 |
+| `hybrid` | agent 报告 + orchestrator 自动化检查 + 用户最终签字 | 跑完 §7 后再触发 `AskUserQuestion`,用户可基于 agent 报告决定 pass / fail |
+
+**字段别名**(plan 输入兼容写法,phase-state.js init 接受):
+- 标准:`gateType` (camelCase)
+- 别名:`gate_type` (snake_case,与 `is_gate` / `depends_on` 风格一致)
+- 缺省:`auto`(向后兼容,旧 plan 无 `gateType` 时不报错)
+
+**2. Manual gate 流程**(orchestrator 在 §7 之后执行)
+
+```
+phase 进入 §7 Gate Integration Test 完成(gated 状态)
+        │
+        ▼
+[Check] phase.gateType?
+        │
+   ┌────┴────┐
+   │         │
+ auto      manual / hybrid
+   │         │
+   ▼         ▼
+§9 normal  set-phase <id> awaiting_user_review   ← Bug-06 新状态
+continue   │
+            ▼
+           state.awaiting_user_review = { phaseId, askedAt, optionsShown }
+           │  (顶层字段,manual gate 进行时存在,get-current-phase 检测到该字段时返回 done=false + awaiting=true)
+           ▼
+           AskUserQuestion(
+             question: "Phase N (gateType=manual) 是否通过?",
+             header: "Gate N review",
+             options: [
+               { label: "pass",              description: "通过,继续下一阶段" },
+               { label: "fail",              description: "不通过,触发 ALERT 并退出" },
+               { label: "request-changes",   description: "回退到上一阶段重新执行" },
+               { label: "skip",              description: "跳过本阶段(谨慎使用,记录到日志)" }
+             ],
+             multiSelect: false
+           )
+           │
+           ▼
+       收到答复 → set-phase <id> <user-review-decision>
+            │
+       ┌────┼────────┐
+       │    │        │
+     pass  fail  request-changes   skip
+       │    │        │
+       ▼    ▼        ▼
+   user-  user-  回退到上一阶段    skip 当前 phase
+   review- review- (set-phase ... pending + 当作新任务重做)
+   pass   fail
+       │    │
+       ▼    ▼
+   §9 续   ALERT.md + exit
+```
+
+**3. `state.json` schema 扩展**(与 phase-state.js 同步)
+
+```jsonc
+{
+  "phases": [
+    {
+      "number": "02",
+      "isGate": true,
+      "gateType": "manual",   // ← 新字段,默认 auto,缺省时 phase-state.js 视作 auto
+      "status": "awaiting_user_review"  // ← 新中间态,见下方
+    }
+  ],
+  // ← 新顶层字段,可选,仅 manual gate 进行时存在
+  //   phase-state.js set-phase 在进入 awaiting_user_review 时自动写入
+  //   在 user-review-pass / user-review-fail / completed 时自动清除
+  "awaiting_user_review": {
+    "phaseId": "02",
+    "askedAt": "2026-06-11T10:30:00Z",
+    "optionsShown": ["pass", "fail", "request-changes", "skip"]
+  }
+}
+```
+
+**3a. 新增 phase status(Bug-06)**
+
+| Status | 进入来源 | 离开目标 | 语义 |
+|--------|---------|---------|------|
+| `awaiting_user_review` | `gated` (manual/hybrid gate) | `user-review-pass` / `user-review-fail` | orchestrator 已发起 AskUserQuestion,等用户答复 |
+| `user-review-pass` | `awaiting_user_review` | `completed` | 用户签字通过 |
+| `user-review-fail` | `awaiting_user_review` | (终态) | 用户判定不通过,触发 ALERT |
+
+**3b. 状态机合法转换表**(phase-state.js 校验,跳过任何中间态 → FATAL)
+
+```
+pending              → in_progress
+in_progress          → executed
+executed             → audited
+audited              → fixed
+fixed                → gated
+gated                → completed              (auto gate 直通)
+gated                → awaiting_user_review   (manual/hybrid gate 入口)
+awaiting_user_review → user-review-pass | user-review-fail
+user-review-pass     → completed
+user-review-fail     → (终态,ALERT)
+completed            → (终态)
+```
+
+**4. Fail Fast 设计**(故意不做的事)
+
+- ❌ **不调 CronCreate**。Manual gate 进行时,atdo 完全 hold,不创建下一次自动唤醒。
+  避免空转、避免 watchdog 误判超时、避免消耗 cron slot。
+- ❌ **不设 timeout 默认值**。"用户不回复就 N 小时后跳过"是危险的反模式——
+  会让 critical gate 被静默绕过。Manual gate 必须等用户显式答复。
+- ❌ **不写 watchdog 超时 ALERT**。watchdog 看到 `awaiting_user_review` 应**正常 hold**,
+  不应判定"心跳超时"。`state.json` 顶层 `awaiting_user_review` 字段就是给 watchdog
+  看的"我在等用户,别动我"信号。
+- ✅ **可恢复**。如需中止,用户/上游可:
+  (a) 通过 `AskUserQuestion` 答复;
+  (b) `CronList` + `CronDelete` 取消已存在的下一次 cron(若 §9 误创建了);
+  (c) 编辑 state.json 把 phase 回退到 gated(应急,不走 set-phase 命令)。
+
+**5. Bug-05 与 Manual gate 的关系**
+
+- Bug-05 规定 `methodology=proxy` 报告不得判定 PASS,要求人工放行(human sign-off)。
+- Manual gate 是 **Bug-05 协议的程序化实现**:把"人工放行"从一个临时补救流程,提升为协议级状态机。
+- 触发条件:phase.gateType = manual / hybrid(显式声明),或 §7 检测到 methodology=proxy 时由 orchestrator
+  主动将 phase 升级为 manual gate(set-phase ... awaiting_user_review)。
+
+**6. 反例 vs 正例**
+
+```jsonc
+// ❌ 反例 1:plan 没标 gateType,§7 又检测到 proxy 报告 → orchestrator 只能临时拼 AskUserQuestion
+{ "phases": [{ "name": "Gate 2", "is_gate": true }] }  // 默认 auto,遇到 proxy 报告无协议可循
+
+// ✅ 正例 1:plan 显式标 manual,orchestrator 走 Manual Gate Protocol
+{ "phases": [{ "name": "Gate 2", "is_gate": true, "gateType": "manual" }] }
+
+// ✅ 正例 2:hybrid 模式,agent 报告作为背景,用户最终签字
+{ "phases": [{ "name": "Gate 3", "is_gate": true, "gateType": "hybrid" }] }
+
+// ✅ 正例 3:旧 plan 无 gateType,phase-state.js 默认 auto,完全向后兼容
+{ "phases": [{ "name": "Gate 1", "is_gate": true }] }  // 等价于 auto,旧行为不变
+```
+
+**7. `phase-state.js` 命令扩展**
+
+| 命令 | 新行为 |
+|------|-------|
+| `set-phase <id> awaiting_user_review` | 顶层写入 `awaiting_user_review = { phaseId, askedAt, optionsShown }` |
+| `set-phase <id> user-review-pass` | 清除顶层 `awaiting_user_review`(若本 phase),写 status=user-review-pass,再由 orchestrator set-phase completed |
+| `set-phase <id> user-review-fail` | 清除顶层 `awaiting_user_review`(若本 phase),写 status=user-review-fail(终态) |
+| `set-phase <id> completed` | 清除顶层 `awaiting_user_review`(若本 phase),写 status=completed,推进游标 |
+| `set-phase <id> <非法来源状态>` | **FATAL**:列出合法转换表,拒绝 |
+
+**8. `get-current-phase` 在 manual gate 期间的行为**
+
+- phase.status === 'awaiting_user_review' → 返回 `{ number, name, isGate, gateType: 'manual', status, awaitingUserReview: true, ... }`
+- orchestrator 据此判断:"当前 phase 已在 manual gate 中,等用户答复"——不调 CronCreate
+- 心跳 status 保持 `active`(不是 `paused`),让 watchdog 知道进程还活着
+
+**9. 完整状态机总览**(B1 修复后,可作为附录)
+
+```
+[pending]
+   │  set-phase in_progress
+   ▼
+[in_progress]
+   │  set-phase executed
+   ▼
+[executed]
+   │  set-phase audited
+   ▼
+[audited]
+   │  set-phase fixed
+   ▼
+[fixed]
+   │  set-phase gated
+   ▼
+[gated] ─── set-phase completed (auto gate 直通) ──────────────┐
+   │                                                             │
+   │  set-phase awaiting_user_review (manual/hybrid gate)       │
+   ▼                                                             │
+[awaiting_user_review]                                            │
+   │  user 答复 pass                                              │
+   ▼                                                             │
+[user-review-pass]                                                │
+   │  set-phase completed                                        │
+   └────────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+                            [completed]  (终态)
+
+   │  user 答复 fail
+   ▼
+[user-review-fail]  (终态,触发 ALERT)
+```
+
 **9. Phase Completion + Continuation**
 
 ```bash

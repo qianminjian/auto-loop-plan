@@ -25,7 +25,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 
-const SCRIPT = path.join(os.homedir(), '.agents/skills/atdo/scripts/phase-state.js');
+// 指向项目内的 phase-state.js(不指向 install 路径)
+// 原因:测试应在项目根运行,加载当前 commit 的代码,而非 install 部署的副本。
+//      install 路径可能在多分支开发中落后于源码,导致测试跑在过期代码上。
+//      Bug-06 起改为项目内路径,SKILL_PATH 也是同样的相对路径风格。
+const SCRIPT = path.join(__dirname, '../../scripts/phase-state.js');
 
 function run(...args) {
   const res = spawnSync('node', [SCRIPT, ...args], {
@@ -53,6 +57,20 @@ function runIn(cwd, ...args) {
 
 function initPlan(dir, plan) {
   return runIn(dir, 'init', plan);
+}
+
+// Bug-06:状态机辅助函数 —— 走完 phase 完整流程到 completed(pending → in_progress → executed → audited → fixed → gated → completed)
+// 用于:旧测试期望"set-phase X completed"一步完成,但 Bug-06 引入的严格状态机要求走完所有中间态
+//      用此函数替代直接的 "set-phase X completed" 以保持状态机一致性
+// 失败时返回最后一次调用的结果(让测试 stderr 可见)
+function runToCompleted(dir, phaseId) {
+  const steps = ['in_progress', 'executed', 'audited', 'fixed', 'gated', 'completed'];
+  let r;
+  for (const s of steps) {
+    r = runIn(dir, 'set-phase', phaseId, s);
+    if (r.code !== 0) return r;
+  }
+  return r;
 }
 
 describe('init', () => {
@@ -203,7 +221,9 @@ describe('set-phase status 白名单 + 游标推进', () => {
   });
 
   test('completed 自动推进游标 0→1', () => {
-    const r = runIn(dir, 'set-phase', '01', 'completed');
+    // Bug-06:状态机要求走完整流程(gated 才能 → completed)
+    const r = runToCompleted(dir, '01');
+    assert.equal(r.code, 0, r.stderr);
     assert.match(r.stdout, /"currentPhaseIndex":\s*1/);
   });
 
@@ -214,9 +234,11 @@ describe('set-phase status 白名单 + 游标推进', () => {
   });
 
   test('完成最后一阶段游标不越界', () => {
-    runIn(dir, 'set-phase', '02', 'completed');
-    const r = runIn(dir, 'set-phase', '03', 'completed');
-    assert.match(r.stdout, /"currentPhaseIndex":\s*2/);
+    // Bug-06:状态机要求走完整流程(走完 02 → 走完 03)
+    const r2 = runToCompleted(dir, '02');
+    assert.equal(r2.code, 0, r2.stderr);
+    const r3 = runToCompleted(dir, '03');
+    assert.match(r3.stdout, /"currentPhaseIndex":\s*2/);
   });
 });
 
@@ -243,13 +265,15 @@ describe('get-current-phase 单调推进', () => {
   });
 
   test('完成 01 后返 02', () => {
-    runIn(dir, 'set-phase', '01', 'completed');
+    // Bug-06:状态机要求走完整流程
+    runToCompleted(dir, '01');
     const r = runIn(dir, 'get-current-phase');
     assert.match(r.stdout, /"number":\s*"02"/);
   });
 
   test('全部 completed 返 done', () => {
-    runIn(dir, 'set-phase', '02', 'completed');
+    // Bug-06:状态机要求走完整流程
+    runToCompleted(dir, '02');
     const r = runIn(dir, 'get-current-phase');
     assert.match(r.stdout, /"done":\s*true/);
   });
@@ -674,9 +698,12 @@ describe('E2E 3 阶段完整流程', () => {
 
     // 阶段 1
     assert.equal(runIn(dir, 'get-current-phase').stdout.match(/"number":\s*"(\d+)"/)[1], '01');
+    // Bug-06:状态机要求走完整流程(in_progress → executed → audited → fixed → gated → completed)
     runIn(dir, 'set-phase', '01', 'in_progress');
     runIn(dir, 'set-phase', '01', 'executed');
     runIn(dir, 'set-phase', '01', 'audited');
+    runIn(dir, 'set-phase', '01', 'fixed');
+    runIn(dir, 'set-phase', '01', 'gated');
     runIn(dir, 'set-phase', '01', 'completed');
     runIn(dir, 'record-commit', '01', 'aaaaaaa');
 
@@ -685,6 +712,7 @@ describe('E2E 3 阶段完整流程', () => {
     runIn(dir, 'set-phase', '02', 'in_progress');
     runIn(dir, 'set-phase', '02', 'executed');
     runIn(dir, 'set-phase', '02', 'audited');
+    runIn(dir, 'set-phase', '02', 'fixed');
     runIn(dir, 'set-phase', '02', 'gated');
     runIn(dir, 'set-phase', '02', 'completed');
     runIn(dir, 'record-commit', '02', 'bbbbbbb');
@@ -694,6 +722,8 @@ describe('E2E 3 阶段完整流程', () => {
     runIn(dir, 'set-phase', '03', 'in_progress');
     runIn(dir, 'set-phase', '03', 'executed');
     runIn(dir, 'set-phase', '03', 'audited');
+    runIn(dir, 'set-phase', '03', 'fixed');
+    runIn(dir, 'set-phase', '03', 'gated');
     runIn(dir, 'set-phase', '03', 'completed');
     runIn(dir, 'record-commit', '03', 'ccccccc');
 
@@ -734,10 +764,19 @@ describe('P2 修复回归 (v6 6 项加固)', () => {
     });
 
     test('合法顺序(01→02→03)全部 completed 通过', () => {
+      // Bug-06:状态机要求走完整流程(pending → in_progress → executed → audited → fixed → gated → completed)
       runIn(dir, 'set-phase', '01', 'in_progress');
       runIn(dir, 'set-phase', '01', 'executed');
+      runIn(dir, 'set-phase', '01', 'audited');
+      runIn(dir, 'set-phase', '01', 'fixed');
+      runIn(dir, 'set-phase', '01', 'gated');
       runIn(dir, 'set-phase', '01', 'completed');
-      // 现在游标在 02,可以把 02 标 completed
+      // 现在游标在 02,可以把 02 标 completed(走完整流程)
+      runIn(dir, 'set-phase', '02', 'in_progress');
+      runIn(dir, 'set-phase', '02', 'executed');
+      runIn(dir, 'set-phase', '02', 'audited');
+      runIn(dir, 'set-phase', '02', 'fixed');
+      runIn(dir, 'set-phase', '02', 'gated');
       const r = runIn(dir, 'set-phase', '02', 'completed');
       assert.equal(r.code, 0);
     });
@@ -1198,5 +1237,171 @@ describe('Bug-04 非 Gate Phase commit 规则明文化', () => {
     assert.match(skillContent, /不需要\s*commit|不强制\s*commit|不强制在\s*phase\s*收尾|不需要\s*强制/);
     // 必须提到 orchestrator 收尾仅持久化 state.json(不需 commit)
     assert.match(skillContent, /orchestrator.*?不需要\s*commit|orchestrator\s*在\s*非\s*Gate\s*Phase\s*收尾.*?不需要/i);
+  });
+});
+
+// ─── Bug-06 (P1): Manual Gate Protocol 定义 + state schema 扩展 ──
+// 症状:Gate 3 等场景是"人工对比 02/03/10 三篇资产"——这是用户判断,agent 不可代理。
+//      SKILL.md "Phase Execution Protocol" 全程没说如何处理 manual gate,
+//      orchestrator 只能临时拼凑 AskUserQuestion,流程 ad-hoc。
+// 修复:
+//   1. SKILL.md 新增 "Manual Gate Protocol" 章节,定义 gateType 字段(auto/manual/hybrid) +
+//      状态机(audited → awaiting_user_review → user-review-pass | user-review-fail)
+//   2. phase-state.js 扩展 set-phase 接受 awaiting_user_review / user-review-pass /
+//      user-review-fail + 严格状态机校验(跳过任何状态 → FATAL)
+//   3. state.json 顶层新增可选字段 awaiting_user_review({phaseId, askedAt, optionsShown})
+describe('Bug-06 Manual Gate Protocol 定义 + state schema 扩展', () => {
+  const SKILL_PATH = path.join(__dirname, '../../SKILL.md');
+  const skillContent = fs.readFileSync(SKILL_PATH, 'utf8');
+
+  // 测试 1:SKILL.md 包含 "gateType" 或 "manual gate" 协议说明
+  test('SKILL.md 包含 gateType/manual gate 协议说明', () => {
+    // 必须明确提到 gateType 字段
+    assert.match(skillContent, /gateType/);
+    // 必须列出三种取值(auto / manual / hybrid)
+    assert.match(skillContent, /\bauto\b/);
+    assert.match(skillContent, /\bmanual\b/);
+    assert.match(skillContent, /\bhybrid\b/);
+    // 必须用"manual gate"作为协议名词
+    assert.match(skillContent, /manual\s*gate/i);
+  });
+
+  // 测试 2:SKILL.md 包含 "awaiting_user_review" 状态说明
+  test('SKILL.md 包含 awaiting_user_review 状态说明', () => {
+    // 必须明确提到 awaiting_user_review 作为状态名(防止以后编辑把这段删掉)
+    assert.match(skillContent, /awaiting_user_review/);
+    // 必须配套提到 user-review-pass(用户签字通过)
+    assert.match(skillContent, /user-review-pass/);
+    // 必须配套提到 user-review-fail(用户判定不通过)
+    assert.match(skillContent, /user-review-fail/);
+  });
+
+  // 测试 3:SKILL.md 包含 Manual Gate Protocol 章节标题
+  test('SKILL.md 包含 Manual Gate Protocol 章节标题', () => {
+    // 必须有专章(## 或 ### 二级/三级标题)
+    assert.match(skillContent, /##+\s*Manual\s*Gate\s*Protocol/i);
+    // 必须有 Bug-06 标记(标明该章节是 Bug-06 修复)
+    // 用 \d+ 匹配版本号/编号,避免以后版本号变了硬编码失败
+    assert.match(skillContent, /Bug-?06|Bug[\s-]?0?6/);
+  });
+
+  // 测试 4:phase-state.js 支持新状态 awaiting_user_review / user-review-pass
+  describe('phase-state.js 支持 manual gate 新状态', () => {
+    let dir;
+    before(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-bug06-'));
+      initPlan(dir, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+    });
+    after(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+
+    test('set-phase 接受 awaiting_user_review(在 gated 之后)', () => {
+      // 先走到 gated 状态(完整流程:pending → in_progress → executed → audited → fixed → gated)
+      runIn(dir, 'set-phase', '01', 'in_progress');
+      runIn(dir, 'set-phase', '01', 'executed');
+      runIn(dir, 'set-phase', '01', 'audited');
+      runIn(dir, 'set-phase', '01', 'fixed');
+      runIn(dir, 'set-phase', '01', 'gated');
+      // 现在手动 gate 入口:应该被接受
+      const r = runIn(dir, 'set-phase', '01', 'awaiting_user_review');
+      assert.equal(r.code, 0, r.stderr);
+      // 顶层 awaiting_user_review 字段必须存在
+      const state = JSON.parse(runIn(dir, 'get').stdout);
+      assert.ok(state.awaiting_user_review, '顶层 awaiting_user_review 字段应存在');
+      assert.equal(state.awaiting_user_review.phaseId, '01');
+      assert.ok(state.awaiting_user_review.askedAt, 'askedAt 必须有值');
+      assert.ok(Array.isArray(state.awaiting_user_review.optionsShown), 'optionsShown 必须是数组');
+    });
+
+    test('set-phase 接受 user-review-pass(从 awaiting_user_review 出发)', () => {
+      // 走到 awaiting_user_review
+      runIn(dir, 'set-phase', '01', 'in_progress');
+      runIn(dir, 'set-phase', '01', 'executed');
+      runIn(dir, 'set-phase', '01', 'audited');
+      runIn(dir, 'set-phase', '01', 'fixed');
+      runIn(dir, 'set-phase', '01', 'gated');
+      runIn(dir, 'set-phase', '01', 'awaiting_user_review');
+      // user-review-pass 应被接受
+      const r = runIn(dir, 'set-phase', '01', 'user-review-pass');
+      assert.equal(r.code, 0, r.stderr);
+      // 顶层 awaiting_user_review 字段必须被清除
+      const state = JSON.parse(runIn(dir, 'get').stdout);
+      assert.equal(state.awaiting_user_review, undefined, '完成 manual gate 后顶层字段应被清除');
+    });
+  });
+
+  // 测试 5:phase-state.js 拒绝非法状态转换(如 pending → completed 跳过中间状态)
+  describe('phase-state.js 严格状态机校验', () => {
+    function freshDir() {
+      return fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-bug06-strict-'));
+    }
+
+    test('pending → completed 跳过中间态 → FATAL', () => {
+      // 之前的合法 set-phase 用法:set-phase <id> completed 在"游标指向的阶段"上是允许的
+      // 等等,先看现有 P2-A 测试..."跳过中间阶段直接 completed → die"用的是 03(游标不指向)
+      // 这里测的是同一阶段内"pending → completed 跳过中间态"
+      // Bug-06 状态机:pending 只能 → in_progress,不能直接 → completed
+      const d = freshDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        const r = runIn(d, 'set-phase', '01', 'completed');
+        assert.equal(r.code, 1, 'pending → completed 跳过中间态应被拒绝');
+        assert.match(r.stderr, /非法转换|允许的转换表/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('in_progress → completed 跳过 executed/audited/fixed/gated → FATAL', () => {
+      const d = freshDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        runIn(d, 'set-phase', '01', 'in_progress');
+        const r = runIn(d, 'set-phase', '01', 'completed');
+        assert.equal(r.code, 1, 'in_progress → completed 跳过中间态应被拒绝');
+        assert.match(r.stderr, /非法转换/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('executed → gated 跳过 audited/fixed → FATAL', () => {
+      const d = freshDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        runIn(d, 'set-phase', '01', 'in_progress');
+        runIn(d, 'set-phase', '01', 'executed');
+        const r = runIn(d, 'set-phase', '01', 'gated');
+        assert.equal(r.code, 1, 'executed → gated 跳过 audited/fixed 应被拒绝');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('completed → 任意状态 → FATAL(终态保护)', () => {
+      const d = freshDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        // 走完正常流程到 completed
+        runIn(d, 'set-phase', '01', 'in_progress');
+        runIn(d, 'set-phase', '01', 'executed');
+        runIn(d, 'set-phase', '01', 'audited');
+        runIn(d, 'set-phase', '01', 'fixed');
+        runIn(d, 'set-phase', '01', 'gated');
+        runIn(d, 'set-phase', '01', 'completed');
+        // 现在尝试回到 in_progress
+        const r = runIn(d, 'set-phase', '01', 'in_progress');
+        assert.equal(r.code, 1, 'completed → in_progress 应被拒绝(终态保护)');
+        assert.match(r.stderr, /终态/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('manual gate: gated → completed(auto gate 直通)合法', () => {
+      // 验证 gated → completed 仍然合法(向后兼容,auto gate 直通)
+      const d = freshDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        runIn(d, 'set-phase', '01', 'in_progress');
+        runIn(d, 'set-phase', '01', 'executed');
+        runIn(d, 'set-phase', '01', 'audited');
+        runIn(d, 'set-phase', '01', 'fixed');
+        runIn(d, 'set-phase', '01', 'gated');
+        const r = runIn(d, 'set-phase', '01', 'completed');
+        assert.equal(r.code, 0, 'auto gate 直通 gated → completed 必须仍然合法');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
   });
 });
