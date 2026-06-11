@@ -45,7 +45,7 @@ AUTO_PHASE_NO_CONFIRM=true /atdo plan.md   # 完全无人值守(跳过所有检�
   6. 关口检测          is_gate / depends_on / 每 2 阶段 / 最后一阶段
   7. Gate 集成测试     gsd-integration-checker + lint + jest --findRelatedTests
   8. Git commit        仅关口通过时,精确 add + 提交 + 记录 hash
-  9. 状态持久化        atomic write + backup + ScheduleWakeup
+  9. 状态持久化        atomic write + backup + CronCreate (durable, 跨会话续)
 ```
 
 ## 三档计划解析

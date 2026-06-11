@@ -11,7 +11,7 @@ argument-hint: "<plan-file> [--from N] [--to N] [--only N] [--resume] [--dry-run
 # atdo
 
 Automated phased project development orchestrator. One turn = one phase.
-After each phase: persist state → ScheduleWakeup → next turn continues.
+After each phase: persist state → CronCreate (durable) → next turn continues.
 
 ## Core Rules (READ FIRST)
 
@@ -59,6 +59,9 @@ decay across turns is precisely why we re-inject the full text every time.
   _proc-use/dev/      部署/安装/卸载脚本
   _proc-use/docs/     设计文档、变更记录
   _proc-use/reports/  测试报告、审计报告(运行产生)
+  _proc-use/buginfo/  Bug 报告、复盘(长期保留,与 dev/docs/reports
+                      等临时过程文件语义不同;未来版本化跟踪时,
+                      应移到根目录的 buginfo/)
   _proc-use/_test-*/  临时单次测试产物(可清理)
   _proc-use/_audit-*/ 临时单次审计产物(可清理)
 
@@ -162,7 +165,7 @@ echo '<json>' | node scripts/phase-state.js init
 
 ## Execution Loop (ONE PHASE PER TURN)
 
-After startup, find the first phase with status `pending` or `in_progress`. Process exactly ONE phase, then persist and exit via ScheduleWakeup.
+After startup, find the first phase with status `pending` or `in_progress`. Process exactly ONE phase, then persist and schedule the next wakeup via CronCreate (durable, cross-session — NOT ScheduleWakeup, which requires /loop dynamic mode and fails silently in standard invocations).
 
 ### Phase Execution Protocol
 
@@ -388,16 +391,65 @@ find .phase-execution/phases/<phaseId> -maxdepth 1 -name '*.log' -exec mv {} .ph
 - Release lock: `node scripts/phase-state.js unlock`
 
 **If more phases remain:**
-- Call the ScheduleWakeup tool to schedule the next turn:
+- Call the **CronCreate** tool (NOT ScheduleWakeup — that requires /loop
+  dynamic mode and silently fails in standard invocations. See
+  `_proc-use/buginfo/atdo-schedulewakeup-tool-mismatch-2026-06-11.md`).
+  CronCreate is cross-session (durable: true) and works without /loop.
+  Minimum granularity is 1 minute (no 270s equivalent).
+
+  ```bash
+  # Compute target time (now + 5 min, in cron syntax)
+  TARGET_EPOCH=$(( $(date +%s) + 300 ))
+  TARGET_MIN=$(date -r $TARGET_EPOCH +%M)
+  TARGET_HOUR=$(date -r $TARGET_EPOCH +%H)
   ```
-  ScheduleWakeup(
-    delaySeconds: 270,     // stay within 5-min cache window
-    reason: "next phase auto-resume",
-    prompt: "Resume atdo. Read .phase-execution/state.json. Continue from first phase with status 'pending'. Follow the execution loop protocol."
+  ```
+  CronCreate(
+    cron: "${TARGET_MIN} ${TARGET_HOUR} * * *",
+    durable: true,           # PERSIST across session — required for non-/loop mode
+    recurring: false,        # one-shot — auto-deletes after firing
+    prompt: "atdo auto-resume for next pending phase.
+
+  ── DEFENSIVE CONTEXT CHECK (do this FIRST) ──
+    Verify this is an atdo context. If any of these fail, exit cleanly
+    with 'atdo: not in atdo context, ignoring auto-resume' — do NOT
+    execute any other actions:
+      a) Read ~/.agents/skills/atdo/SKILL.md — must exist (canonical install)
+      b) Read .phase-execution/state.json — must exist (active run)
+
+  ── INSTRUCTIONS FOR THE WOKEN-UP AGENT ──
+    1. Read .phase-execution/state.json. Run:
+         node ~/.agents/skills/atdo/scripts/phase-state.js get-current-phase
+       to determine the next pending phase.
+    2. If state shows all phases 'completed' (done=true) or get-current
+       returns 'done':
+       - Run: bash ~/.agents/skills/atdo/scripts/watchdog.sh cleanup
+       - Output: 'atdo: all phases complete, exiting auto-resume'
+       - Exit cleanly
+    3. Else (pending phase exists):
+       - Read ~/.agents/skills/atdo/SKILL.md to load the atdo protocol
+         (this is the CANONICAL source — the symlink at
+         ~/.claude/skills/atdo/SKILL.md also works)
+       - Follow the Execution Loop from Step 1 (Pre-flight) for the
+         pending phase returned by get-current-phase
+       - After completing that phase, follow SKILL.md Step 9 to
+         CronCreate the next wakeup (this continues the chain)
+    4. DO NOT modify state.json directly — only via phase-state.js
+       commands (use the installed path ~/.agents/skills/atdo/scripts/).
+    5. STALE PHASE DETECTION (before processing): if any phase has
+       status 'in_progress' with updatedAt > 60min ago, the previous
+       wakeup didn't complete normally. Record the anomaly by running:
+         node ~/.agents/skills/atdo/scripts/phase-state.js inc-strike <phaseId> regression
+       then continue with the normal flow. The 60min threshold is
+       generous (avoids false positives on slow tests / large refactors);
+       do not treat it as a hard failure."
   )
   ```
-- The wakeup will fire and continue with the next phase automatically.
-- If you need longer delays (e.g., waiting for external CI), use up to 3600s, but prefer 270s to keep the prompt cache warm.
+- The cron will fire and continue with the next phase automatically.
+- If the user wants to stop the chain: `CronList` → find the entry
+  → `CronDelete <id>`. The lock + state remain for manual `--resume`.
+- The recurring one-shot chain self-terminates when the final phase
+  completes (Step 2 above triggers cleanup + exit).
 
 ## Verification Protocol (Orchestrator-Direct)
 
