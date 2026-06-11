@@ -33,6 +33,42 @@ After each phase: persist state → ScheduleWakeup → next turn continues.
 ### Trust Nothing Principle
 Agent output is UNTRUSTED. Every claim must be independently verified by the orchestrator (you) using direct shell commands. See Verification Protocol below.
 
+### Process File Containment Policy (PROJECT POLICY)
+
+> Defines the constant **`PROCESS_FILE_POLICY`**, prepended to the task
+> prompt of **every** spawned agent (gsd-executor / gsd-code-reviewer /
+> gsd-code-fixer / gsd-integration-checker). Reason: LLM context decays
+> across turns — without per-phase re-injection, the executing agent
+> will eventually forget "where to put process files" and pollute the
+> project root. This is the single most common cleanup hazard in
+> multi-phase runs.
+
+**PROCESS_FILE_POLICY (verbatim — copy this block into every spawn prompt):**
+
+```
+[项目政策 — 过程文件隔离,强制执行]
+
+本项目所有非核心交付物的过程文件 — 包括:设计文档、部署/安装脚本、
+测试脚本、调试输出、审计报告、临时测试产物 — 必须放在 _proc-use/ 下,
+按性质分子目录:
+
+  _proc-use/dev/      部署/安装/卸载脚本
+  _proc-use/docs/     设计文档、变更记录
+  _proc-use/reports/  测试报告、审计报告(运行产生)
+  _proc-use/_test-*/  临时单次测试产物(可清理)
+  _proc-use/_audit-*/ 临时单次审计产物(可清理)
+
+项目根目录只允许:Git 配置(.git/.gitignore)、核心交付物
+(SKILL.md/README.md)、代码目录(scripts/、references/)、
+CI/License、IDE 配置。过程文件严禁散落根目录。
+
+反向引用禁令:核心代码(SKILL.md/scripts/references/)不得
+引用 _proc-use/ 下任何文件,即使测试代码反向引用生产代码。
+
+完成本阶段后,自查:本阶段新增文件是否全在合法位置?根目录是否
+无新孤儿?
+```
+
 ## Arguments
 
 | Argument | Effect |
@@ -139,6 +175,10 @@ After startup, find the first phase with status `pending` or `in_progress`. Proc
 **2. Agent Execution**
 Spawn gsd-executor agent with this prompt structure:
 ```
+${PROCESS_FILE_POLICY}
+────────────────────────────────────────
+(以下是你本阶段的任务)
+
 Execute phase {N}: {name}.
 Goal: {goal}
 Tasks: {tasks}
@@ -182,8 +222,14 @@ Record findings to execution-log.md.
 
 Spawn gsd-code-reviewer agent:
 ```
+${PROCESS_FILE_POLICY}
+────────────────────────────────────────
+(以下是审计任务)
+
 Review all files changed in phase {N}. Check: lint, syntax, diff scope, debug residue, hardcoded secrets.
-Write structured report to .phase-execution/phases/{N}/audit-report.md.
+Write structured report to .phase-execution/phases/{N}/audit-report.md
+(NOTE: this is the atdo runtime report path, NOT _proc-use/ — atdo's own
+state is a special case exempt from the policy above).
 Use the template at ~/.agents/skills/atdo/references/templates/audit-report-template.md.
 
 Output at end: [AUTO-EXEC-RESULT: status=SUCCESS|FAILED, blockers=<count>, warnings=<count>]
@@ -195,7 +241,23 @@ After agent returns:
 
 **5. Fix Loop** (max 3 attempts)
 
-For each BLOCKER in audit-report:
+For each BLOCKER in audit-report, spawn gsd-code-fixer with the standard
+policy prepended:
+```
+${PROCESS_FILE_POLICY}
+────────────────────────────────────────
+(以下是修复任务)
+
+Fix the following BLOCKERs from audit-report for phase {N}:
+{blockerList}
+Constraints: Make MINIMAL targeted changes only. Do NOT refactor surrounding
+code. Do NOT change unrelated files. Verify each fix with a syntax check
+before declaring done.
+
+Output: [AUTO-EXEC-RESULT: status=SUCCESS|FAILED, fixes_applied=<count>, files_changed=<count>]
+```
+
+Then re-audit. Strike tracking:
 ```
 Attempt 1: gsd-code-fixer → re-audit
 Attempt 2: gsd-code-fixer → re-audit
@@ -224,9 +286,14 @@ If NOT a gate: skip to step 8 (completion).
 
 Spawn gsd-integration-checker agent:
 ```
+${PROCESS_FILE_POLICY}
+────────────────────────────────────────
+(以下是关口集成测试)
+
 Verify cross-phase integration for phases {1} through {N}.
 Check: exports connect to imports, APIs have consumers, data flows end-to-end.
-Write report to .phase-execution/gates/gate-{label}/integration-test-report.md.
+Write report to .phase-execution/gates/gate-{label}/integration-test-report.md
+(NOTE: atdo runtime report — exempt from the _proc-use/ policy above).
 Use template at ~/.agents/skills/atdo/references/templates/integration-test-report-template.md.
 
 Output: [AUTO-EXEC-RESULT: status=SUCCESS|FAILED, integration_errors=<count>]
