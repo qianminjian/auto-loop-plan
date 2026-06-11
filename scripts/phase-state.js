@@ -10,7 +10,7 @@
  *   node phase-state.js get-current-phase         获取当前待处理阶段
  *   node phase-state.js inc-strike <phaseId> <type>  增加 strike 计数
  *   node phase-state.js get-strikes <phaseId>     获取 strike 计数
- *   node phase-state.js record-commit <phaseId> <hash>  记录 commit hash
+ *   node phase-state.js record-commit <phaseId> <hash[,hash,...]>  记录 commit hash(支持单 hash 或 comma-separated 多 hash)
  *   node phase-state.js lock                      获取锁
  *   node phase-state.js unlock                    释放锁
  *   node phase-state.js check-disk                磁盘空间检查
@@ -292,7 +292,8 @@ function cmdInit() {
       dependsOn: p.depends_on || p.requires || [],
       isGate: p.is_gate !== undefined ? p.is_gate : (p.gate !== undefined ? p.gate : false),
       status: 'pending',
-      commitHash: null,
+      commits: [],
+      commitHash: null,  // 兼容字段:最后一个 commit 的 hash(单 hash 场景与多 hash 场景共用)
       startedAt: null,
       completedAt: null,
       statusSince: null,
@@ -529,14 +530,38 @@ function cmdGetStrikes() {
 function cmdRecordCommit() {
   const state = readState();
   const phaseId = args[0];
-  const hash = args[1];
+  const raw = args[1];
   const phase = state.phases.find(p => p.number === phaseId);
   if (!phase) die(`阶段 ${phaseId} 不存在`);
-  if (!hash || !/^[a-f0-9]{7,40}$/i.test(hash)) die(`无效的 commit hash: "${hash}"`);
-  phase.commitHash = hash;
+  // Bug-03: 支持 comma-separated 多 hash(agent 一次产 N 个 commit 场景)
+  //   例子:record-commit 01 32db291,3c79edb,078de4c
+  //   - 全部校验通过 → 全部写入 phase.commits(数组),并把最后一个 hash 同步到 phase.commitHash(兼容字段)
+  //   - 任一不通过 → FATAL(精确指出哪个 hash 在哪个位置无效),原子性:不部分写入
+  //   - 空字符串 / 仅空白 / 仅逗号 / 末尾悬空逗号 → FATAL
+  //   - 单 hash 调用("abc1234")仍按单元素数组处理,完全向后兼容
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    die(`record-commit 需要非空的 hash 参数(支持单 hash 或逗号分隔的多个 hash)。例如: record-commit ${phaseId} abc1234 或 record-commit ${phaseId} abc1234,def5678`);
+  }
+  const parts = raw.split(',').map(s => s.trim());
+  // 1) 任何空片段都拒绝(含末尾悬空逗号、中间空段、纯逗号)
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i] === '') {
+      die(`无效的 commit hash 列表: 位置 ${i + 1} 为空(原始参数: "${raw}")。正确格式: "hash1,hash2,hash3",hash 之间用英文逗号分隔,不要带空格或空段`);
+    }
+  }
+  // 2) 任何 hash 不符合 7-40 位 hex 字符 → 拒绝(精确指出位置)
+  const HASH_RE = /^[a-f0-9]{7,40}$/i;
+  for (let i = 0; i < parts.length; i++) {
+    if (!HASH_RE.test(parts[i])) {
+      die(`无效的 commit hash: 位置 ${i + 1} 的 "${parts[i]}" 不匹配 7-40 位 hex 字符(原始参数: "${raw}")。正确格式: "hash1,hash2,hash3",例:32db291,3c79edb,078de4c`);
+    }
+  }
+  // 3) 全部校验通过 → 原子写入(此时 state 还没动过,validate-then-write 天然原子)
+  phase.commits = parts;
+  phase.commitHash = parts[parts.length - 1];  // 兼容字段:SKILL.md 报告模板与 E2E 测试读这个
   state.updatedAt = new Date().toISOString();
   writeState(state);
-  process.stdout.write(JSON.stringify({ ok: true, phase: phaseId, hash }));
+  process.stdout.write(JSON.stringify({ ok: true, phase: phaseId, commits: parts, count: parts.length }));
 }
 
 function cmdSanitize() {

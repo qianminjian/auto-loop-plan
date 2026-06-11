@@ -429,7 +429,11 @@ git add <list of expected changed files>
 git commit -m "auto-phase: Phase {N} complete [gate:{label}] [audit:passed]"
 
 # Record
-node scripts/phase-state.js record-commit <phaseId> <commit-hash>
+# Bug-03: 支持单 hash 也支持 comma-separated 多 hash(agent 一次产 N 个 commit 场景)
+#   例子:node scripts/phase-state.js record-commit 01 32db291,3c79edb,078de4c
+#   - hash 之间用英文逗号分隔,逗号周围的空格会被自动 trim
+#   - 任一 hash 无效 / 末尾悬空逗号 / 列表为空 → FATAL,不部分写入
+node scripts/phase-state.js record-commit <phaseId> <hash[,hash,...]>
 ```
 
 Commit failure handling:
@@ -619,7 +623,7 @@ node ~/.agents/skills/atdo/scripts/phase-state.js get-current-phase       # Get 
 node ~/.agents/skills/atdo/scripts/phase-state.js set-phase <id> <status> # Update phase status
 node ~/.agents/skills/atdo/scripts/phase-state.js inc-strike <id> <type>  # Increment strike
 node ~/.agents/skills/atdo/scripts/phase-state.js get-strikes [phaseId]  # Query strike counts
-node ~/.agents/skills/atdo/scripts/phase-state.js record-commit <id> <h>  # Record commit hash
+node ~/.agents/skills/atdo/scripts/phase-state.js record-commit <id> <h[,h,...]>  # Record commit hash(es),comma-separated supported
 node ~/.agents/skills/atdo/scripts/phase-state.js summary                 # State summary
 
 # Safety
