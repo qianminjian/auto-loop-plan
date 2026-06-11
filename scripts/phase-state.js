@@ -75,9 +75,15 @@ function atomicWrite(filepath, data) {
 function readState() {
   let state = readJSON(STATE_FILE);
   // 主文件损坏/缺失 → 按序回退:bak.1(最近) → bak.2 → bak.3 → 旧版单一 backup
-  for (const f of [...BACKUP_FILES, BACKUP_LEGACY]) {
-    if (state) break;
-    state = readJSON(f);
+  // 静默回退会导致时序错位(用户以为在 phase 5,实际回到 phase 3),必须 stderr WARN 告知编排器
+  if (!state) {
+    for (const f of [...BACKUP_FILES, BACKUP_LEGACY]) {
+      state = readJSON(f);
+      if (state) {
+        process.stderr.write(`[WARN] 主 state.json 损坏/缺失,已从 ${path.basename(f)} 回退。数据可能不是最新。\n`);
+        break;
+      }
+    }
   }
   if (!state) {
     die('状态文件损坏且无备份，无法恢复。请检查 .phase-execution/ 目录。');
@@ -118,12 +124,12 @@ const SECRET_PATTERNS = [
   /\b(ghr_[a-zA-Z0-9]{20,})\b/g,                            // GitHub App refresh
   // Other SaaS tokens
   /\b(AKIA[A-Z0-9]{16})\b/g,                                // AWS access key
-  /\b(glpat-[a-zA-Z0-9_-]{20,})\b/g,                        // GitLab
+  /\b(glpat-[a-zA-Z0-9_-]{16,})\b/g,                        // GitLab
   /\b(xox[abprs]-[a-zA-Z0-9-]{10,})\b/g,                    // Slack
   /\b(dckr_pat_[a-zA-Z0-9_-]{16,})\b/g,                    // Docker Hub
-  /\b(npm_[a-zA-Z0-9]{20,})\b/g,                            // npm token
-  /\b(pypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{20,})\b/g,          // PyPI token
-  /\b(ATATT[A-Za-z0-9_-]{20,})\b/g,                         // Atlassian
+  /\b(npm_[a-zA-Z0-9]{16,})\b/g,                            // npm token
+  /\b(pypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{16,})\b/g,          // PyPI token
+  /\b(ATATT[A-Za-z0-9_-]{16,})\b/g,                         // Atlassian
   // PEM private keys (whole block)
   /(-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----)/g,
   // JWT
@@ -402,7 +408,16 @@ function cmdGetCurrentPhase() {
 function cmdIncStrike() {
   const state = readState();
   const phaseId = args[0];
-  const type = args[1] || 'execution';
+  // rawType 用于校验是否传了空串;type 用于实际写入,默认 execution
+  const rawType = args[1];
+  const type = rawType || 'execution';
+  // 参数校验:phaseId 必须存在,type 不能是空字符串
+  if (!phaseId) die('inc-strike 需要 phaseId 作为第一个参数');
+  if (rawType !== undefined && (typeof rawType !== 'string' || rawType.trim() === '')) {
+    die('inc-strike type 不能为空字符串');
+  }
+  // phaseId 引用存在性(防止 phaseRetry[undefined]={} 污染 state)
+  if (!state.phases.find(p => p.number === phaseId)) die(`inc-strike: 阶段 ${phaseId} 不存在`);
 
   // 根据 type 分流到不同 strike 维度
   //   regression       → 写入 strikes.regression (全局计数,>=2 触发)
