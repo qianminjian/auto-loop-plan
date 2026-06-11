@@ -163,6 +163,78 @@ Otherwise: parse plan → show at checkpoint → wait for confirmation → write
 echo '<json>' | node scripts/phase-state.js init
 ```
 
+## state.json Schema
+
+`phase-state.js init` 接受的 plan JSON 有 3 条隐性规则,违反时返回 FATAL。
+第一次使用时,先看这里再写 plan — 避免试错。
+
+### 最小可工作示例
+
+```json
+{
+  "phases": [
+    { "name": "环境准备",    "tasks": ["安装依赖", "配置环境"] },
+    { "name": "核心实现",    "tasks": ["写代码", "写测试"], "depends_on": ["01"] },
+    { "name": "发布",        "tasks": ["打包", "上线"],     "depends_on": ["02"], "is_gate": true }
+  ]
+}
+```
+
+### 3 条隐性规则(必须遵守)
+
+1. **`tasks` 必须是 `string[]` — 不是 `number[]`,也不是 `{id, desc}[]`**
+   每个元素是任务描述字符串,描述"做什么"(供 gsd-executor agent 读取执行)。
+
+2. **阶段 id 是 2 位数字字符串(`"01"` / `"02"` / `"03"`),由位置自动分配**
+   plan 输入**不读** `id` / `number` 字段,id 永远是 `String(数组下标 + 1).padStart(2, '0')`。
+   `depends_on` 引用第 N 个阶段就写 `"0N"`,不是 `"phaseN"` / `"1"` / `"phase-1"`。
+
+3. **`depends_on` 引用的 id 必须精确匹配某个阶段的 `number` 字段**
+   否则 FATAL:`depends_on 引用不存在的阶段 "<id>"`。
+   id 不存在 = 拼写错误,或依赖了尚未在数组中出现的阶段。
+
+### 反例 vs 正例
+
+```jsonc
+// ❌ 反例 1:tasks 是 number[]
+{ "phases": [{ "name": "a", "tasks": [1, 2, 3] }] }
+//    → FATAL: 阶段 01 task 必须是字符串(string[]),不是 number 也不是 {id, desc}[]
+
+// ❌ 反例 2:tasks 是 {id, desc} 对象数组
+{ "phases": [{ "name": "a", "tasks": [{ "id": "t1", "desc": "task one" }] }] }
+//    → FATAL: 阶段 01 task 必须是字符串(string[]),不是 number 也不是 {id, desc}[]
+
+// ❌ 反例 3:depends_on 用了人类可读 id
+{ "phases": [
+    { "name": "a" },
+    { "name": "b", "depends_on": ["phase1"] }   // 错:"phase1" 不是自动分配的 id
+]}
+//    → FATAL: 阶段 02 depends_on 引用不存在的阶段 "phase1"
+
+// ✅ 正例:tasks 是 string[],depends_on 用 2 位数字 id
+{ "phases": [
+    { "name": "a", "tasks": ["task 描述 1", "task 描述 2"] },
+    { "name": "b", "tasks": ["task 描述 3"], "depends_on": ["01"] }
+]}
+```
+
+### 字段别名(plan 输入兼容写法)
+
+| 标准字段 | 也接受 | 说明 |
+|---------|--------|------|
+| `name` | `id`(若 `name` 缺失) | 阶段显示名 |
+| `depends_on` | `requires` | 依赖的阶段 id 列表 |
+| `is_gate` | `gate` | 是否为质量关口 |
+| `success_criteria` | (无别名) | 成功条件数组 |
+
+### 长度上限(防 DoS / 误用)
+
+- `name` ≤ 200 字符
+- `goal` ≤ 2000 字符
+- `tasks` 数组 ≤ 50 项
+- 单个 `task` ≤ 500 字符
+- 阶段总任务数 > 15 → 触发 WARN(建议拆分)
+
 ## Execution Loop (ONE PHASE PER TURN)
 
 After startup, find the first phase with status `pending` or `in_progress`. Process exactly ONE phase, then persist and schedule the next wakeup via CronCreate (durable, cross-session — NOT ScheduleWakeup, which requires /loop dynamic mode and fails silently in standard invocations).

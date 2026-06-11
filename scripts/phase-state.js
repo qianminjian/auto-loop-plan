@@ -277,10 +277,10 @@ function cmdInit() {
     if (typeof goal !== 'string') die(`阶段 ${i + 1} goal 必须是字符串`);
     if (goal.length > GOAL_MAX) die(`阶段 ${i + 1} goal 长度 ${goal.length} > ${GOAL_MAX}`);
     const tasks = p.tasks || [];
-    if (!Array.isArray(tasks)) die(`阶段 ${i + 1} tasks 必须是数组`);
-    if (tasks.length > TASKS_MAX) die(`阶段 ${i + 1} tasks 数量 ${tasks.length} > ${TASKS_MAX}`);
+    if (!Array.isArray(tasks)) die(`阶段 ${String(i + 1).padStart(2, '0')} tasks 必须是字符串数组(string[]),不是 number 也不是 {id, desc}[]。例:["task A", "task B"]`);
+    if (tasks.length > TASKS_MAX) die(`阶段 ${i + 1} tasks 数量 ${tasks.length} > ${TASKS_MAX}。请将阶段拆分为多个更小的阶段`);
     for (const t of tasks) {
-      if (typeof t !== 'string') die(`阶段 ${i + 1} task 必须是字符串`);
+      if (typeof t !== 'string') die(`阶段 ${String(i + 1).padStart(2, '0')} task 必须是字符串(string),不是 ${typeof t} 也不是 {id, desc} 对象。例:["task A", "task B"]`);
       if (t.length > TASK_LEN_MAX) die(`阶段 ${i + 1} task 长度 > ${TASK_LEN_MAX}`);
     }
     return {
@@ -305,8 +305,10 @@ function cmdInit() {
   const ids = new Set(phases.map(p => p.number));
   for (const p of phases) {
     // depends_on 引用存在性
+    // 提示:阶段 id 是 2 位数字字符串(01/02/03),由位置自动分配
+    //      depends_on 必须用自动分配的 id,如 ["01", "02"],不是 "phase1" / "1"
     for (const dep of p.dependsOn) {
-      if (!ids.has(dep)) die(`阶段 ${p.number} depends_on 引用不存在的阶段 "${dep}"`);
+      if (!ids.has(dep)) die(`阶段 ${p.number} depends_on 引用不存在的阶段 "${dep}"。阶段 id 由位置自动分配(2 位数字字符串),请用 ["01", "02"] 这种格式,而不是 "phase1"/"1"`);
     }
     // 任务数警告(>15 提示拆分)
     if (Array.isArray(p.tasks) && p.tasks.length > 15) {
