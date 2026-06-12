@@ -395,6 +395,26 @@ function cmdInit() {
     die(`检测到循环依赖,涉及阶段: ${cycleNodes.join(', ')}`);
   }
 
+  // Bug-09:planHash 字段(state.json 顶层可选)
+  //   - 来源:plan JSON 顶层 planHash 字段(用户/上游自己算好 md5)
+  //   - 缺失时不 FATAL(向后兼容 — 旧 init 调用无 planHash 必须继续工作)
+  //   - 仅做基本类型校验(必须是字符串);非字符串 → FATAL(防 type confusion)
+  //   - 写入 state.json 顶层,供 orchestrator 做防御性 md5 对比
+  let planHash = null;
+  if (plan && Object.prototype.hasOwnProperty.call(plan, 'planHash')) {
+    if (typeof plan.planHash !== 'string') {
+      die(`init: plan.planHash 必须是字符串(string),不是 ${typeof plan.planHash}。如果不需要 hash,请省略 planHash 字段`);
+    }
+    if (plan.planHash.length === 0) {
+      die(`init: plan.planHash 不能是空字符串。如果不需要 hash,请省略 planHash 字段`);
+    }
+    // 长度上限:md5 是 32 hex,这里是 planHash 的最大可能值(留余量)
+    if (plan.planHash.length > 64) {
+      die(`init: plan.planHash 长度 ${plan.planHash.length} > 64(超过 md5+ 实际可能范围)`);
+    }
+    planHash = plan.planHash;
+  }
+
   const state = {
     version: '2.0',
     projectRoot: process.cwd(),
@@ -414,8 +434,12 @@ function cmdInit() {
     securityEvents: [],
     exitReason: null,
   };
+  // Bug-09:planHash 写入顶层(仅当 plan JSON 提供了它,缺失时字段不存在 — 向后兼容)
+  if (planHash !== null) {
+    state.planHash = planHash;
+  }
   writeState(state);
-  process.stdout.write(JSON.stringify({ ok: true, phases: phases.length }, null, 2));
+  process.stdout.write(JSON.stringify({ ok: true, phases: phases.length, planHash: planHash || undefined }, null, 2));
 }
 
 function cmdGet() {

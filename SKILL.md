@@ -284,6 +284,92 @@ echo '<json>' | node scripts/phase-state.js init
 - 单个 `task` ≤ 500 字符
 - 阶段总任务数 > 15 → 触发 WARN(建议拆分)
 
+## Plan vs State 一致性规则 (Bug-09)
+
+> **背景**:state.json 有 `phases[].tasks[]`,原 plan file(`_proc-use/EXECUTION_PLAN.md` /
+> 用户传入的 `<plan-file>`)也有 task 列表。两者**没有自动同步机制**——
+> plan 改了 state.json 不会跟变,反之亦然。潜在风险:数据漂移,
+> orchestrator 不知道以哪个为准。
+>
+> **决策**:采用"**state.json 是 single source of truth (SSOT),plan file 只在 init 时读一次**"。
+> 简单优先(YAGNI)—— init 一次性解析 plan → 后续 phase 启动不重新解析,
+> 避免"plan 改 → state 跟 → 数据漂移"的复杂一致性协议。
+
+### 1. SSOT 原则:state.json 是 single source of truth
+
+- **state.json 包含执行所需的全部信息**:
+  `phases[].id / name / tasks / status / commits / gateType / depends_on` 等
+- **state.json 持久化机制已成熟**:
+  atomic write + .bak.1/2/3 备份轮转 + heartbeat 监控 + lock 持有语义
+  (见 §state.json Schema / Step 1 Lock 持有语义)
+- **所有 phase 启动、set-phase、record-commit、inc-strike 等操作都以 state.json 为准**
+
+### 2. plan file 角色:**只在 init 时读一次**
+
+- plan file 的**唯一用途**:在 `node scripts/phase-state.js init` 阶段被读一次,
+  内容(phases 数组)被**拷贝**到 state.json 的 `phases` 字段
+- init 完成后,**orchestrator 不再读取 plan file**:
+  - 不重新解析 tasks
+  - 不与 state.json 对比
+  - 不响应 plan file 的任何修改
+- plan file 改了 → **不影响 atdo 执行**(这是 by design,不是 bug)
+- 如果用户想用新 plan,应**重新 init**:
+  ```bash
+  rm .phase-execution/state.json
+  # 然后重启 atdo 并传新 plan-file(走 init 流程)
+  ```
+  重新 init 会丢弃旧 state.json 的 phase 进度,这是 by design 的"硬 reset"。
+
+### 3. plan vs state 不一致检测(防御性、可选)
+
+> **作用**:纯防御性,避免误报,不阻断流程。
+
+- state.json 顶层**可选**字段 `planHash: <md5-hex>`,
+  记录 init 时 plan file 的 md5(由 `phase-state.js init` 计算)
+- orchestrator **可选**在 phase 启动时做 hash 对比:
+  ```bash
+  # 示例:仅用于日志记录,不阻断
+  CURRENT_HASH=$(md5 -q <plan-file>)
+  STATE_HASH=$(node scripts/phase-state.js get planHash)
+  if [ "$CURRENT_HASH" != "$STATE_HASH" ]; then
+    echo "[INFO] plan file 已被修改(init 后),state.json 仍按原 plan 执行"
+  fi
+  ```
+- 不一致 → 输出 **INFO 日志**(不是 WARN,不阻断)
+- 协议层不强制 orchestrator 做这个检查(避免误报 + 性能开销)
+- `--resume` 时**不**做 hash 校验(plan 可能在 init 之后改过,
+  但 state.json 是合法的当前状态,不应被 hash 不匹配阻断 resume)
+
+### 4. planHash 字段细节(phase-state.js init 行为)
+
+| 场景 | planHash 行为 |
+|------|--------------|
+| plan JSON 顶层含 `planHash: "..."` | init 把它直接写入 state.json 顶层 |
+| plan JSON 不含 `planHash` | init **不**计算,不 FATAL;state.json 顶层无 planHash 字段(向后兼容) |
+| 旧 state.json 无 planHash 字段 | 所有命令把它当作"未设置",不影响行为 |
+
+> **设计权衡**:init **不**自动从 plan file 读内容算 md5,因为
+> `phase-state.js init` 只接收 stdin/arg 的 plan JSON,不接触原 plan file
+> (避免路径校验、I/O 风险)。如果用户想让 state.json 记录 hash,
+> 应在调用 init 前自己算好,放进 plan JSON 顶层。
+
+### 5. 明确禁止(防止未来重构回退)
+
+- ❌ orchestrator 在 phase 启动前**不得**重新读 plan file 解析 tasks
+- ❌ orchestrator **不得**自动同步 plan 修改到 state.json
+- ❌ orchestrator **不得**在 phase 启动时强制做 planHash 不一致阻断
+  (防御性检测只能 INFO,不能 FAIL)
+- ❌ `phase-state.js init` **不得**因 planHash 缺失而 FATAL
+  (向后兼容,旧 init 调用无 planHash 字段时必须继续工作)
+
+### 6. 用户答疑(常见问题)
+
+| 用户问 | 协议回复 |
+|-------|---------|
+| "我改了 plan 怎么没生效?" | "atdo 启动后 plan 不再生效(state.json 是 single source of truth)。如需用新 plan,请 `rm .phase-execution/state.json` 后重新 init" |
+| "planHash 有什么用?" | "纯防御性检测。orchestrator 可选在 phase 启动时做 md5 对比,不一致输出 INFO 日志(不阻断)。防止 orchestrator 误以为 plan 改动会自动生效" |
+| "为什么 init 不自动算 planHash?" | "init 只接收 plan JSON,不接触原 plan file(避免路径校验、I/O 风险)。如果需要 hash,在调用 init 前自己算" |
+
 ## Execution Loop (ONE PHASE PER TURN)
 
 After startup, find the first phase with status `pending` or `in_progress`. Process exactly ONE phase, then persist and schedule the next wakeup via CronCreate (durable, cross-session — NOT ScheduleWakeup, which requires /loop dynamic mode and fails silently in standard invocations).

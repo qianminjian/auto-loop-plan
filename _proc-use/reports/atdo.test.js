@@ -1712,3 +1712,200 @@ describe('Bug-07 Checkpoint 协议 Phase-scoped 幂等 token', () => {
     });
   });
 });
+
+// ─── Bug-09 (P2): state.json 是 single source of truth + planHash 防漂移 回归 ──
+// 症状:state.json 的 `phases[].tasks[]` 与原 plan file 的 task 列表没有自动
+//      同步机制 — plan 改了 state.json 不会跟变,反之亦然,潜在数据漂移风险。
+// 修复:
+//   1. SKILL.md 新增 "Plan vs State 一致性规则" 章节,明文:
+//      - state.json 是 single source of truth (SSOT)
+//      - plan file 只在 init 时读一次,init 后不再读取
+//      - planHash 防御性检测(可选,缺失/不一致不阻断)
+//   2. phase-state.js init 接受 plan JSON 顶层可选 planHash 字段,
+//      写入 state.json 顶层(向后兼容 — 缺失时无字段,init 不 FATAL)
+//   3. 旧 state.json 无 planHash 字段时,所有命令正常工作
+describe('Bug-09 state.json 是 single source of truth + planHash 防漂移', () => {
+  const SKILL_PATH = path.join(__dirname, '../../SKILL.md');
+  const skillContent = fs.readFileSync(SKILL_PATH, 'utf8');
+
+  describe('SKILL.md Plan vs State 一致性规则文档', () => {
+    test('SKILL.md 包含 "single source of truth" / "SSOT" / "state.json 是 single source" 明确说明', () => {
+      // Bug-09 关键文档:SSOT 原则必须明文表达
+      // 接受多种等价措辞(英文 / 中文)
+      const re = /single\s*source\s*of\s*truth|SSOT|state\.json\s*是\s*single\s*source/i;
+      assert.match(skillContent, re,
+        'SKILL.md 必须包含 single source of truth / SSOT / state.json 是 single source 明确说明');
+    });
+
+    test('SKILL.md 包含 "plan file 只在 init 时读一次" 或类似明确说明', () => {
+      // Bug-09 关键边界:plan file 角色明文 — 只在 init 时读一次
+      // 接受多种等价措辞(中文表达略有差异)
+      // 关键点:必须表达"只在 init 读一次" / "init 后不再读取"
+      const re = /plan\s*file[^。\n]{0,40}(只在|仅在|只\s*在)\s*init|plan[^。\n]{0,40}init\s*时\s*读\s*一次|init\s*后[^。\n]{0,40}(不再|不\s*再)\s*读取|init\s*时[^。\n]{0,40}读\s*一次/;
+      assert.match(skillContent, re,
+        'SKILL.md 必须包含 plan file 只在 init 时读一次 类似明确说明');
+    });
+
+    test('SKILL.md 包含 planHash 字段说明', () => {
+      // Bug-09 防御性检测:必须提到 planHash 字段
+      assert.match(skillContent, /planHash/,
+        'SKILL.md 必须包含 planHash 字段说明');
+    });
+
+    test('SKILL.md 明文禁止在 phase 启动前重新读 plan file 解析 tasks', () => {
+      // Bug-09 明确禁止 — 防止未来重构回退
+      // 关键边界:orchestrator 不得重新解析 plan
+      // SKILL.md 用法: `**不得**` (加粗) — 接受加粗/非加粗
+      const re = /\**不得\**\s*重新\s*读\s*plan|不得\s*重新\s*解析|不得\s*在\s*phase\s*启动前/;
+      assert.match(skillContent, re,
+        'SKILL.md 必须明文禁止在 phase 启动前重新读 plan file');
+    });
+
+    test('SKILL.md 明确说明 plan 改动不生效 + 重新 init 路径', () => {
+      // 用户答疑:用户改 plan 怎么没生效 + 怎么"换 plan"
+      // 必须告诉用户"用新 plan 重新 init"路径
+      assert.match(skillContent, /plan\s*不\s*再生效|plan\s*不\s*会\s*自动\s*生效|plan\s*改\s*了[^。\n]{0,15}不\s*生效/);
+      // 必须告诉用户重新 init(rm state.json + 重启)
+      assert.match(skillContent, /重新\s*init|rm\s*\.phase-execution\/state\.json|rm\s*state\.json/);
+    });
+  });
+
+  describe('phase-state.js init 接受可选 planHash 字段', () => {
+    function freshDir() {
+      return fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-bug09-'));
+    }
+
+    test('plan JSON 含 planHash → 写入 state.json 顶层', () => {
+      const d = freshDir();
+      try {
+        const r = initPlan(d, JSON.stringify({
+          phases: [{ number: '01', name: 'a' }],
+          planHash: 'abc123def456',
+        }));
+        assert.equal(r.code, 0, r.stderr);
+        // state.json 顶层必须有 planHash 字段
+        const state = JSON.parse(runIn(d, 'get').stdout);
+        assert.equal(state.planHash, 'abc123def456', 'planHash 必须写入 state.json 顶层');
+        // 也可通过 get planHash 单独读
+        const got = runIn(d, 'get', 'planHash');
+        assert.equal(got.stdout, 'abc123def456');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('plan JSON 不含 planHash → 不 FATAL,state.json 顶层无 planHash 字段(向后兼容)', () => {
+      const d = freshDir();
+      try {
+        const r = initPlan(d, JSON.stringify({
+          phases: [{ number: '01', name: 'a' }],
+        }));
+        assert.equal(r.code, 0, r.stderr);
+        // state.json 顶层不应有 planHash 字段(向后兼容 — 旧 init 调用无此字段必须工作)
+        const state = JSON.parse(runIn(d, 'get').stdout);
+        assert.equal(state.planHash, undefined, 'planHash 缺失时 state.json 顶层不应有 planHash 字段');
+        // get planHash 应返回 null(缺失键)
+        const got = runIn(d, 'get', 'planHash');
+        assert.equal(got.stdout, 'null');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('planHash 非字符串 → FATAL(防 type confusion)', () => {
+      const d = freshDir();
+      try {
+        const r = initPlan(d, JSON.stringify({
+          phases: [{ number: '01', name: 'a' }],
+          planHash: 12345,  // 数字而非字符串
+        }));
+        assert.equal(r.code, 1, 'planHash 非字符串应 FATAL');
+        assert.match(r.stderr, /planHash\s*必须是\s*字符串/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('planHash 空字符串 → FATAL', () => {
+      const d = freshDir();
+      try {
+        const r = initPlan(d, JSON.stringify({
+          phases: [{ number: '01', name: 'a' }],
+          planHash: '',
+        }));
+        assert.equal(r.code, 1, 'planHash 空字符串应 FATAL');
+        assert.match(r.stderr, /planHash\s*不能\s*是\s*空\s*字符串/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('planHash 超长(>64 字符) → FATAL', () => {
+      const d = freshDir();
+      try {
+        const r = initPlan(d, JSON.stringify({
+          phases: [{ number: '01', name: 'a' }],
+          planHash: 'a'.repeat(65),  // md5=32 / sha256=64,留余量 64
+        }));
+        assert.equal(r.code, 1, 'planHash 超长应 FATAL');
+        assert.match(r.stderr, /planHash\s*长度/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('md5 长度边界值(32 hex) → 通过', () => {
+      const d = freshDir();
+      try {
+        const md5 = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6';  // 32 chars
+        const r = initPlan(d, JSON.stringify({
+          phases: [{ number: '01', name: 'a' }],
+          planHash: md5,
+        }));
+        assert.equal(r.code, 0, r.stderr);
+        const state = JSON.parse(runIn(d, 'get').stdout);
+        assert.equal(state.planHash, md5);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('64 字符上限边界值 → 通过', () => {
+      const d = freshDir();
+      try {
+        const r = initPlan(d, JSON.stringify({
+          phases: [{ number: '01', name: 'a' }],
+          planHash: 'a'.repeat(64),
+        }));
+        assert.equal(r.code, 0, r.stderr);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+  });
+
+  describe('向后兼容:旧 state.json 无 planHash 字段', () => {
+    function freshDir() {
+      return fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-bug09-bc-'));
+    }
+
+    test('get/set-phase/get-current-phase 等命令对旧 state.json 正常工作', () => {
+      const d = freshDir();
+      try {
+        // 模拟旧版 init 产出的 state.json(无 planHash 字段)
+        fs.mkdirSync(path.join(d, '.phase-execution'), { recursive: true });
+        const oldState = {
+          version: '2.0',
+          projectRoot: d,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          phases: [
+            { number: '01', name: 'a', status: 'pending', commits: [], commitHash: null },
+            { number: '02', name: 'b', status: 'pending', commits: [], commitHash: null },
+          ],
+          currentPhaseIndex: 0,
+          strikes: { phaseRetry: {}, regression: 0, sameCategory: {} },
+          networkStatus: { consecutiveFailures: 0, lastSuccessfulCall: null },
+          securityEvents: [],
+          exitReason: null,
+        };
+        fs.writeFileSync(path.join(d, '.phase-execution/state.json'), JSON.stringify(oldState, null, 2));
+        // get planHash 应返回 null(字段不存在)
+        const got = runIn(d, 'get', 'planHash');
+        assert.equal(got.stdout, 'null');
+        // set-phase 仍正常工作
+        const r1 = runIn(d, 'set-phase', '01', 'in_progress');
+        assert.equal(r1.code, 0);
+        // get-current-phase 仍正常工作
+        const r2 = runIn(d, 'get-current-phase');
+        assert.match(r2.stdout, /"number":\s*"01"/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+  });
+});
