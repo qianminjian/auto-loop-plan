@@ -432,6 +432,28 @@ echo '<json>' | node scripts/phase-state.js init
 - 单个 `task` ≤ 500 字符
 - 阶段总任务数 > 15 → 触发 WARN(建议拆分)
 
+### 顶层特殊字段(P3-23 补 — 不属于 phases[] 的 state.json 顶层字段)
+
+> **背景**:state.json 顶层除 `phases[]` / `currentPhaseIndex` / `strikes` 等核心
+> 字段外,还有 6 个**特殊场景字段**,分散在 11 个 fix commit 中引入。
+> 主 `state.json Schema` 章节未集中列,从该章节无法一览。
+> 本节作为"集中索引" — 每个字段的详细协议仍以原 Bug-XX 章节为准。
+
+| 字段 | 类型 | 出现时机 | 来源 |
+|------|------|----------|------|
+| `awaiting_user_review` | `{phaseId, askedAt, optionsShown}` \| 缺失 | manual gate 阶段进入时设,离开(完成/失败)时清除 | Bug-06 |
+| `userConfirmations` | `[{phaseId, scope, decidedAt, decision}]` | `record-confirm` 调用时 append(每 phase 上限 10 条) | Bug-07 / P2-15 |
+| `planHash` | `string`(md5 hex) \| 缺失 | `init` 接受 plan JSON 顶层 `planHash` 字段时写入(可选) | Bug-09 |
+| `securityEvents` | `[{file, at, secretsFound}]` | `sanitize` 检测到 secrets 时 append | Bug-09 / P2-14 |
+| `networkStatus` | `{consecutiveFailures, lastSuccessfulCall}` | 已删除(P2-7 清理死字段) | — |
+| `exitReason` | `string \| null` | 已删除(P2-7 清理死字段) | — |
+
+**关键约定**:
+- 这些字段都是**可选**的 — init 不强制写入,旧 state.json 缺失时所有命令正常工作
+- `awaiting_user_review` 是**互斥**的 — 同一时刻最多 1 个 phase 在 manual gate
+- `userConfirmations` 是**追加**的 — 不删除历史,只 push 新记录
+- `securityEvents` 是**累积**的 — orchestrator 在 final report 中可读 `securityEventCount`
+
 ## Plan vs State 一致性规则 (Bug-09)
 
 > **背景**:state.json 有 `phases[].tasks[]`,原 plan file(`_proc-use/EXECUTION_PLAN.md` /
