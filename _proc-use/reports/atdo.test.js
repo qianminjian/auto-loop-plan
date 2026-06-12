@@ -3299,4 +3299,41 @@ describe('v2.0.x P2/P3 微修复', () => {
       } finally { fs.rmSync(d, { recursive: true, force: true }); }
     });
   });
+
+  describe('P3-4: README 引用设计文档', () => {
+    // P3-4: _proc-use/docs/DESIGN.md 与 _proc-use/docs/README.md 未被 README 引用
+    //   用户难以发现架构设计沉淀
+    // 修复:README 末尾加"📚 设计文档"小节,链接到 _proc-use/docs/README.md 和 DESIGN.md
+    // 测试:grep README 验证两个链接都在
+
+    test('README 末尾有"📚 设计文档"小节', () => {
+      const readmePath = path.join(__dirname, '..', '..', 'README.md');
+      const content = fs.readFileSync(readmePath, 'utf8');
+      assert.match(content, /##\s+📚\s+设计文档/,
+        'README 末尾应有"📚 设计文档"小节');
+    });
+
+    test('README 链接到 _proc-use/docs/README.md', () => {
+      const readmePath = path.join(__dirname, '..', '..', 'README.md');
+      const content = fs.readFileSync(readmePath, 'utf8');
+      assert.match(content, /_proc-use\/docs\/README\.md/,
+        'README 应链接到 _proc-use/docs/README.md');
+    });
+
+    test('README 链接到 _proc-use/docs/DESIGN.md', () => {
+      const readmePath = path.join(__dirname, '..', '..', 'README.md');
+      const content = fs.readFileSync(readmePath, 'utf8');
+      assert.match(content, /_proc-use\/docs\/DESIGN\.md/,
+        'README 应链接到 _proc-use/docs/DESIGN.md');
+    });
+
+    test('_proc-use/docs/ 实际存在 README.md 和 DESIGN.md 文件', () => {
+      // 引用必须指向真实文件,不能 dead link
+      const docsDir = path.join(__dirname, '..', '..', '_proc-use', 'docs');
+      assert.ok(fs.existsSync(path.join(docsDir, 'README.md')),
+        '_proc-use/docs/README.md 应存在');
+      assert.ok(fs.existsSync(path.join(docsDir, 'DESIGN.md')),
+        '_proc-use/docs/DESIGN.md 应存在');
+    });
+  });
 });

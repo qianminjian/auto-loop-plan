@@ -118,11 +118,11 @@ node _proc-use/reports/atdo.test.js
 
 | 项目 | 数量 |
 |------|------|
-| 测试套件 | 51 |
-| 测试用例 | 235 |
+| 测试套件 | 58 |
+| 测试用例 | 258 |
 | 通过率 | 100% |
 
-覆盖:init / get / set-phase / get-current-phase / inc-strike / get-strikes / record-commit / record-confirm / has-confirm / validate-summary / compare-plan-hash / lock / unlock / check-disk / check-lock-age / sanitize / heartbeat / summary / backup rotation / E2E 完整流程 + 9 个安全注入回归(路径穿越、命令注入、LLM 幻觉、敏感文件检测、P2 6 项加固)。
+覆盖:init / get / set-phase / get-current-phase / inc-strike / get-strikes / record-commit / record-confirm / has-confirm / validate-summary / compare-plan-hash / lock / unlock / check-disk / check-lock-age / sanitize / heartbeat / summary / backup rotation / E2E 完整流程 + 9 个安全注入回归(路径穿越、命令注入、LLM 幻觉、敏感文件检测、P2 6 项加固)+ v2.0.x P2/P3 微修复(parseDfOutput / writeState 备份 / watchdog 守护 / 模板字段 / inc-strike ALERT 触发)。
 
 ## 文件清单
 
@@ -136,3 +136,10 @@ references/templates/
 ```
 
 完整协议见 `SKILL.md`。本文档只列日常使用,详细执行逻辑以 `SKILL.md` 为准。
+
+## 📚 设计文档
+
+atdo 的架构设计、变更记录、决策过程沉淀在以下过程文档中(由 gitignore 排除,本地仓库内可见):
+
+- [`_proc-use/docs/README.md`](_proc-use/docs/README.md) — 设计文档总览
+- [`_proc-use/docs/DESIGN.md`](_proc-use/docs/DESIGN.md) — 整体架构与核心决策
