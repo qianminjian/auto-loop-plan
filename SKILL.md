@@ -597,7 +597,7 @@ Write structured report to .phase-execution/phases/{N}/audit-report.md
 (NOTE: atdo runtime report path — exempt from the _proc-use/ rule above).
 Use the template at ~/.agents/skills/atdo/references/templates/audit-report-template.md.
 
-Output at end: [AUTO-EXEC-RESULT: status=SUCCESS|FAILED, blockers=<count>, warnings=<count>]
+Output at end: [AUTO-EXEC-RESULT: status=SUCCESS|FAILED, methodology=proxy|real|mixed, blockers=<count>, warnings=<count>]
 ```
 
 After agent returns:
@@ -619,7 +619,7 @@ Constraints: Make MINIMAL targeted changes only. Do NOT refactor surrounding
 code. Do NOT change unrelated files. Verify each fix with a syntax check
 before declaring done.
 
-Output: [AUTO-EXEC-RESULT: status=SUCCESS|FAILED, fixes_applied=<count>, files_changed=<count>]
+Output: [AUTO-EXEC-RESULT: status=SUCCESS|FAILED, methodology=proxy|real|mixed, fixes_applied=<count>, files_changed=<count>]
 ```
 
 Then re-audit. Strike tracking:
@@ -661,7 +661,7 @@ Write report to .phase-execution/gates/gate-{label}/integration-test-report.md
 (NOTE: atdo runtime report path — exempt from the _proc-use/ rule above).
 Use template at ~/.agents/skills/atdo/references/templates/integration-test-report-template.md.
 
-Output: [AUTO-EXEC-RESULT: status=SUCCESS|FAILED, integration_errors=<count>]
+Output: [AUTO-EXEC-RESULT: status=SUCCESS|FAILED, methodology=proxy|real|mixed, integration_errors=<count>]
 ```
 
 If integration failures → gate fix loop (max 3 attempts):
