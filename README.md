@@ -97,8 +97,8 @@ node _proc-use/reports/atdo.test.js
 
 | 项目 | 数量 |
 |------|------|
-| 测试套件 | 18 |
-| 测试用例 | 110 |
+| 测试套件 | 46 |
+| 测试用例 | 206 |
 | 通过率 | 100% |
 
 覆盖:init / get / set-phase / get-current / inc-strike / record-commit / sanitize / check-disk / heartbeat / lock / backup rotation / E2E 完整流程 + 9 个安全注入回归(路径穿越、命令注入、LLM 幻觉、敏感文件检测、P2 6 项加固)。
@@ -106,8 +106,8 @@ node _proc-use/reports/atdo.test.js
 ## 文件清单
 
 ```
-SKILL.md                                   # 主编排器(462 行)
-scripts/phase-state.js                     # 13 个状态管理命令(621 行,零依赖)
+SKILL.md                                   # 主编排器(1467 行)
+scripts/phase-state.js                     # 13 个状态管理命令(1058 行,零依赖)
 scripts/watchdog.sh                        # 孤儿进程清理 + 心跳检查
 references/templates/
 ├── audit-report-template.md               # 审计报告模板
