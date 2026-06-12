@@ -655,6 +655,43 @@ describe('P1-6: sanitize → state.json.securityEvents 集成 E2E', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // P2-11: 多次 sanitize → securityEvents 累积
+  test('P2-11: 多次 sanitize → securityEvents 累积,每条事件含 file/at/secretsFound', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-test-'));
+    try {
+      initPlan(dir, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+      // 2 个不同文件 + 不同 secret — 必须 >=20 字符才能命中 SECRET_PATTERNS 的 {20,} 限定
+      const f1 = path.join(dir, '.phase-execution', 'phases', '01', 'audit-1.md');
+      const f2 = path.join(dir, '.phase-execution', 'phases', '01', 'audit-2.md');
+      fs.mkdirSync(path.dirname(f1), { recursive: true });
+      // AKIA + 16 字符 = 20 字符总长,1 个 secret
+      fs.writeFileSync(f1, 'AKIAIOSFODNN7EXAMPLE\n');
+      // sk-ant-api03- + 20+ 字符 = 第二个 secret;ghp_ + 20+ 字符 = 第三个 secret,共 2 个
+      fs.writeFileSync(f2, 'sk-ant-api03-abcdefghijklmnopqrst\n');
+      fs.appendFileSync(f2, 'ghp_abcdefghijklmnopqrstuvwx\n');
+      runIn(dir, 'sanitize', f1);
+      runIn(dir, 'sanitize', f2);
+      const state = JSON.parse(fs.readFileSync(path.join(dir, '.phase-execution', 'state.json'), 'utf8'));
+      const events = state.securityEvents || [];
+      assert.equal(events.length, 2, `2 次 sanitize 应累积 2 个事件,实际: ${events.length}`);
+      // 两条事件都应含 file / at / secretsFound 三字段
+      for (const evt of events) {
+        assert.ok(typeof evt.file === 'string' && evt.file.length > 0, 'file 字段非空');
+        assert.ok(typeof evt.at === 'string' && /T.*Z?$/.test(evt.at), `at 字段是 ISO timestamp: ${evt.at}`);
+        assert.ok(typeof evt.secretsFound === 'number' && evt.secretsFound >= 1, 'secretsFound >= 1');
+      }
+      // 第一条对应 audit-1.md,第二条对应 audit-2.md
+      assert.ok(events[0].file.endsWith('audit-1.md'));
+      assert.ok(events[1].file.endsWith('audit-2.md'));
+      assert.equal(events[0].secretsFound, 1);
+      // f2 含 sk-ant-api03-... + ghp_...,SECRET_PATTERNS 计数可能 2 或 3(取决于 regex 匹配优先)
+      // 只要 >= 2 表示 "多个 secrets" 被检测到,不强求精确数字
+      assert.ok(events[1].secretsFound >= 2, `f2 应检测到 >=2 个 secret,实际: ${events[1].secretsFound}`);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 // P0: SKILL.md 敏感文件检测正则 — 覆盖 .env.local / config/.env / id_rsa 等
