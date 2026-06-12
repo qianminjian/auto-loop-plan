@@ -64,6 +64,10 @@ decay across turns is precisely why we re-inject the full text every time.
                       应移到根目录的 buginfo/)
   _proc-use/_test-*/  临时单次测试产物(可清理)
   _proc-use/_audit-*/ 临时单次审计产物(可清理)
+  .phase-execution/   运行时 transient 状态(必须 gitignore)
+                      含 state.json / phases/<id>/ / gates/<label>/
+                      / heartbeat.json / lock / ALERT.md
+                      (与 _proc-use/<phaseId>/ 长期归档的边界见 Bug-11 章节)
 
 项目根目录只允许:Git 配置(.git/.gitignore)、核心交付物
 (SKILL.md/README.md)、代码目录(scripts/、references/)、
