@@ -12,6 +12,7 @@ set -euo pipefail
 STATE_DIR=".phase-execution"
 HEARTBEAT_FILE="$STATE_DIR/heartbeat.json"
 LOCK_FILE="$STATE_DIR/lock"
+STATE_FILE="$STATE_DIR/state.json"
 HEARTBEAT_TIMEOUT=300  # 5 分钟无心跳判定僵死
 
 # ─── 清理孤儿进程 ───────────────────────────────────────
@@ -65,6 +66,18 @@ check_heartbeat() {
   if [ ! -f "$HEARTBEAT_FILE" ]; then
     echo "[watchdog] 心跳文件不存在，编排器可能未启动"
     return 0
+  fi
+
+  # P1-3: 检查 state.json 顶层 awaiting_user_review 标记
+  # manual gate 期间用户在答复,心跳可能暂停(等用户)。
+  # SKILL.md 协议明确:watchdog 看到 awaiting_user_review 应正常 hold,不应判定心跳超时
+  if [ -f "$STATE_FILE" ]; then
+    local awaiting
+    awaiting=$(node -e "try{const s=require('./$STATE_FILE');process.stdout.write(s.awaiting_user_review?'YES':'NO')}catch{process.stdout.write('NO')}" 2>/dev/null || echo "NO")
+    if [ "$awaiting" = "YES" ]; then
+      echo "[watchdog] 检测到 awaiting_user_review 标记 (manual gate 期间),跳过心跳超时判定"
+      return 0
+    fi
   fi
 
   local hb_time
