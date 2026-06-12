@@ -1909,3 +1909,188 @@ describe('Bug-09 state.json 是 single source of truth + planHash 防漂移', ()
     });
   });
 });
+
+// ─── Bug-10 (P3): summary.md 长度校验(≤500 chars)回归 ──────
+// 症状:协议多处提到 "summary.md (≤500 chars)"(Context Budget / Step 9 写 summary
+//      的 heredoc 注释),但没有强制校验。--resume 模式下 orchestrator 不知道哪些
+//      phase 的 summary.md 已写 / 哪些超长。
+// 修复:
+//   1. SKILL.md 新增 "summary.md 长度约束 (Bug-10)" 章节,明文:
+//      - 硬约束:summary.md ≤ 500 chars(中文字符按 1 char 计)
+//      - orchestrator 校验时机:写完 summary.md 后立即调 validate-summary
+//      - 超 500 chars → FATAL,要求重写
+//   2. phase-state.js 新增 validate-summary <phaseId> 命令,exit code:
+//      0 = PASS(≤500) / 1 = 超长(>500) / 2 = 文件不存在 / 3 = 非 UTF-8 / 4 = 空文件
+//   3. 字符数统计:text.length(JS UTF-16 code unit)
+describe('Bug-10 summary.md 长度校验(≤500 chars)', () => {
+  const SKILL_PATH = path.join(__dirname, '../../SKILL.md');
+  const skillContent = fs.readFileSync(SKILL_PATH, 'utf8');
+
+  describe('SKILL.md summary.md 长度约束文档', () => {
+    test('SKILL.md 包含 "summary.md ≤ 500 chars" 或 "summary 字符数 ≤ 500" 明确说明', () => {
+      // Bug-10 关键约束:必须明文写"summary.md ≤ 500 chars"
+      // 接受多种等价措辞
+      const re = /summary\.md[^。\n]{0,30}≤\s*500\s*chars|summary\s*字符数[^。\n]{0,15}≤\s*500|≤\s*500\s*chars[^。\n]{0,15}summary|summary[^。\n]{0,15}500\s*字符|500\s*字符[^。\n]{0,15}summary/;
+      assert.match(skillContent, re,
+        'SKILL.md 必须包含 "summary.md ≤ 500 chars" 或 "summary 字符数 ≤ 500" 明确说明');
+    });
+
+    test('SKILL.md 包含 500 字符上限 / 边界值说明(超 500 → FATAL)', () => {
+      // Bug-10 边界值:超 500 → FATAL
+      // 接受:超 500 / FATAL / 重写 / 精简 等关键词
+      const hasMax = /500\s*字符\s*上限|≤\s*500|500\s*chars\s*上限|summary\s*超\s*长/;
+      const hasFatal = /FATAL|重写|精简/;
+      assert.ok(
+        hasMax.test(skillContent) && hasFatal.test(skillContent),
+        'SKILL.md 必须包含 500 字符上限 + 超限 → FATAL / 重写 边界值说明'
+      );
+    });
+
+    test('SKILL.md 包含反例 vs 正例对照表(超长 summary vs 精简 summary)', () => {
+      // Bug-10 反例 vs 正例:必须给出具体对比
+      // 接受:反例 / 正例 / 字符数:750 / 字符数:287 / 详细日志 / 代码片段 等关键词
+      const hasBadExample = /反\s*例|超长|FATAL|750/;
+      const hasGoodExample = /正\s*例|精简|287|PASS/;
+      assert.ok(
+        hasBadExample.test(skillContent),
+        'SKILL.md 必须给出反例(超长 summary)'
+      );
+      assert.ok(
+        hasGoodExample.test(skillContent),
+        'SKILL.md 必须给出正例(精简 summary)'
+      );
+    });
+  });
+
+  describe('phase-state.js validate-summary 命令', () => {
+    let dir;
+    before(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-bug10-'));
+      initPlan(dir, JSON.stringify({ phases: [
+        { number: '01', name: 'a' },
+        { number: '02', name: 'b' },
+      ]}));
+    });
+    after(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+
+    function writeSummary(phaseId, content) {
+      const summaryDir = path.join(dir, '.phase-execution/phases', phaseId);
+      fs.mkdirSync(summaryDir, { recursive: true });
+      fs.writeFileSync(path.join(summaryDir, 'summary.md'), content, 'utf8');
+    }
+
+    test('合法 summary(≤500 chars) → exit 0 + stdout 含"✅ ... ≤500"', () => {
+      writeSummary('01', '短内容,5 chars');  // 5 chars
+      const r = runIn(dir, 'validate-summary', '01');
+      assert.equal(r.code, 0, `合法 summary 应返回 0,实际: ${r.code}, stderr: ${r.stderr}`);
+      assert.match(r.stdout, /✅\s*summary\.md\s*is\s*\d+\s*chars\s*\(≤500\)/);
+    });
+
+    test('500 chars 边界值(正好 500) → exit 0', () => {
+      // 边界值:500 chars = PASS(length === 500 视为合法)
+      const content500 = 'a'.repeat(500);
+      writeSummary('02', content500);
+      const r = runIn(dir, 'validate-summary', '02');
+      assert.equal(r.code, 0, `500 chars 边界值应 PASS,实际: ${r.code}, stderr: ${r.stderr}`);
+      assert.match(r.stdout, /is\s*500\s*chars/);
+    });
+
+    test('501 chars 超长 → exit 1 + stderr 含字符数 + 预览', () => {
+      // 超 500 → FATAL
+      const content501 = 'a'.repeat(501);
+      writeSummary('01', content501);
+      const r = runIn(dir, 'validate-summary', '01');
+      assert.equal(r.code, 1, `501 chars 应返回 1,实际: ${r.code}`);
+      assert.match(r.stderr, /超长/);
+      assert.match(r.stderr, /501\s*chars/);
+      // stderr 应含前 100 字符预览
+      assert.match(r.stderr, /前\s*100\s*字符预览/);
+    });
+
+    test('超长中文(501 个中文字符)→ exit 1(中文字符按 1 char 计)', () => {
+      // Bug-10 关键:中文字符按 1 char 计,不按字节
+      const content501zh = '中'.repeat(501);
+      writeSummary('02', content501zh);
+      const r = runIn(dir, 'validate-summary', '02');
+      assert.equal(r.code, 1, `501 个中文字符应返回 1(按 1 char 计),实际: ${r.code}, stderr: ${r.stderr}`);
+      assert.match(r.stderr, /501\s*chars/);
+    });
+
+    test('summary.md 不存在 → exit 2', () => {
+      // 删除 summary.md,模拟"还没写"场景
+      const summaryPath = path.join(dir, '.phase-execution/phases/01/summary.md');
+      if (fs.existsSync(summaryPath)) fs.unlinkSync(summaryPath);
+      const r = runIn(dir, 'validate-summary', '01');
+      assert.equal(r.code, 2, `summary.md 不存在应返回 2,实际: ${r.code}, stderr: ${r.stderr}`);
+      assert.match(r.stderr, /不存在/);
+    });
+
+    test('summary.md 空文件 → exit 4', () => {
+      // 空文件(content.trim() === '')→ 视为未写
+      writeSummary('01', '');
+      const r = runIn(dir, 'validate-summary', '01');
+      assert.equal(r.code, 4, `空文件应返回 4,实际: ${r.code}, stderr: ${r.stderr}`);
+      assert.match(r.stderr, /空\s*文件/);
+    });
+
+    test('summary.md 非 UTF-8 → exit 3', () => {
+      // 写入非法 UTF-8 字节序列(0x80/0x81/0x82/0x83 不是合法 UTF-8 起始字节)
+      const summaryDir = path.join(dir, '.phase-execution/phases/01');
+      fs.mkdirSync(summaryDir, { recursive: true });
+      const buf = Buffer.from([0x80, 0x81, 0x82, 0x83]);
+      fs.writeFileSync(path.join(summaryDir, 'summary.md'), buf);
+      const r = runIn(dir, 'validate-summary', '01');
+      assert.equal(r.code, 3, `非 UTF-8 文件应返回 3,实际: ${r.code}, stderr: ${r.stderr}`);
+      assert.match(r.stderr, /不是\s*合法\s*UTF-8/);
+    });
+
+    test('phaseId 不存在 → die(exit 1)带"阶段 X 不存在"消息', () => {
+      // 防止 phaseId 拼写错误时读非预期路径
+      const r = runIn(dir, 'validate-summary', '99');
+      assert.equal(r.code, 1);
+      assert.match(r.stderr, /阶段\s*99\s*不存在/);
+    });
+
+    test('无 phaseId 参数 → die(exit 1)', () => {
+      const r = runIn(dir, 'validate-summary');
+      assert.equal(r.code, 1);
+      assert.match(r.stderr, /validate-summary\s*需要\s*phaseId/);
+    });
+  });
+
+  describe('validate-summary 字符数 = JS text.length (UTF-16 code unit)', () => {
+    let dir;
+    before(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-bug10-len-'));
+      initPlan(dir, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+    });
+    after(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+
+    test('纯 ASCII:字符数 = 字节数(500 chars = 500 bytes)', () => {
+      // ASCII 字符 UTF-16 code unit = 1,与字节数一致
+      const content = 'a'.repeat(500);
+      const summaryDir = path.join(dir, '.phase-execution/phases/01');
+      fs.mkdirSync(summaryDir, { recursive: true });
+      fs.writeFileSync(path.join(summaryDir, 'summary.md'), content);
+      const r = runIn(dir, 'validate-summary', '01');
+      assert.equal(r.code, 0);
+      assert.match(r.stdout, /is\s*500\s*chars/);
+    });
+
+    test('混合中英:字符数 = JS text.length(不按字节)', () => {
+      // 中文字符占 3 字节(UTF-8),但 JS 视为 1 char
+      // 内容: 250 个中文字符 + 250 个 ASCII = 500 chars(但文件字节数 1000+)
+      const content = '中'.repeat(250) + 'a'.repeat(250);
+      const summaryDir = path.join(dir, '.phase-execution/phases/01');
+      fs.mkdirSync(summaryDir, { recursive: true });
+      fs.writeFileSync(path.join(summaryDir, 'summary.md'), content);
+      // 文件字节数应 > 500(中文占 3 bytes)
+      const fileBytes = fs.statSync(path.join(summaryDir, 'summary.md')).size;
+      assert.ok(fileBytes > 500, `混合中英文件字节数应 > 500,实际: ${fileBytes}`);
+      // 但字符数 = 500,应 PASS
+      const r = runIn(dir, 'validate-summary', '01');
+      assert.equal(r.code, 0, `混合中英 500 chars 应 PASS,实际: ${r.code}, stderr: ${r.stderr}`);
+      assert.match(r.stdout, /is\s*500\s*chars/);
+    });
+  });
+});

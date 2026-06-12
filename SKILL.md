@@ -861,12 +861,15 @@ completed            → (终态)
 # Update state
 node scripts/phase-state.js set-phase <phaseId> completed
 
-# Write summary (≤500 chars)
+# Write summary (≤500 chars,Bug-10 硬约束)
 # 用 heredoc 写入避免特殊字符转义问题(单/双引号、$、反引号等)
 mkdir -p .phase-execution/phases/<phaseId> .phase-execution/archive
 cat > .phase-execution/phases/<phaseId>/summary.md <<'SUMMARY_EOF'
 <phase summary here, ≤500 chars>
 SUMMARY_EOF
+
+# Bug-10:summary.md 写完立即校验,超 500 chars → FATAL
+node scripts/phase-state.js validate-summary <phaseId>
 
 # Write heartbeat
 node scripts/phase-state.js heartbeat <phaseId> "" completed
@@ -940,6 +943,103 @@ find .phase-execution/phases/<phaseId> -maxdepth 1 -name '*.log' -exec mv {} .ph
   → `CronDelete <id>`. The lock + state remain for manual `--resume`.
 - The recurring one-shot chain self-terminates when the final phase
   completes (Step 2 above triggers cleanup + exit).
+
+## summary.md 长度约束 (Bug-10)
+
+> **背景**:协议多处提到 "summary.md (≤500 chars)"(Context Budget 章节 / Step 9
+> 写 summary 的 heredoc 注释),但没有强制校验。`--resume` 模式下,orchestrator
+> 不知道哪些 phase 的 summary.md 已写、哪些超长——本次 atdo 实际手写 summary
+> 476 chars 刚好过线,纯属运气。本节**强制** 500 chars 上限,杜绝侥幸。
+
+### 1. 硬约束
+
+- 每个 phase 的 `summary.md` 字符数 **≤ 500 chars**(中文字符按 1 char 计,不按字节)
+- 字符数统计:JS `text.length`(UTF-16 code unit)—— 与文件字节数无关,**只计字符数**
+- **orchestrator 校验时机**:phase 收尾时(Step 9 写完 summary.md 后)**立即**调
+  `node scripts/phase-state.js validate-summary <phaseId>` 校验
+- 超 500 chars → **FATAL**,要求重写(精简);不写大文件、不留半成品
+- 这是**硬约束**(区别于 Bug-11 命名规范的"软约束"——summary 超长会污染后续 turn
+  的 context,影响 `--resume`,代价是 hard fail)
+
+### 2. 建议策略(写 summary 的取舍)
+
+**应该写(关键决策 / 状态转换)**:
+- ✅ phase 完成时的关键决策(架构选型 / 拒绝的方案 / 留下的 TODO)
+- ✅ 关键 commit hash(阶段产物 commit / 修复 commit)
+- ✅ 状态转换节点(gate 通过 / 触发 manual gate / 失败回退原因)
+- ✅ **已知遗留**:本阶段未完成的子任务 / 后续阶段要接力的钩子
+- ✅ 文件级引用(修改了哪些文件、产出了哪些交付物路径)
+
+**不应该写(避免 context 膨胀)**:
+- ❌ 详细日志(execution log / audit report 内容)— **归档到 archive/**
+- ❌ 代码片段(具体实现细节)— 只写文件路径,代码靠 git history
+- ❌ 完整的 LLM 推理 / 工具调用过程
+- ❌ 与 git commit message 重复的内容(commit message 已落盘,summary 再写一遍是浪费)
+- ❌ Markdown 装饰符(过度标题 / 表格 / 嵌套列表)— 字符数是硬上限,装饰费空间
+
+### 3. 反例 vs 正例
+
+```
+❌ 反例:超长 summary(750 chars,违反 ≤500 上限)
+─────────────────────────────────────────────────
+## 实施记录
+
+### 架构决策
+经过 3 轮讨论,最终选用 TypeScript + Node.js + PostgreSQL 方案,理由:
+1. TS 提供类型安全,降低重构成本
+2. Node 生态成熟,库丰富
+3. PostgreSQL 适合关系型数据,且支持 JSONB 字段
+
+### 代码片段
+src/api/users.ts 实现核心逻辑:
+```ts
+async function createUser(data: UserInput): Promise<User> {
+  const validated = userSchema.parse(data);
+  return await db.users.insert(validated);
+}
+```
+
+### 测试覆盖
+- 单元测试:src/api/users.test.ts,覆盖 happy path / 边界值
+- 集成测试:tests/integration/api.test.ts,验证 HTTP 端到端
+- 覆盖率:核心模块 85%,边缘模块 60%
+
+### Git commits
+- feat(api): 实现 createUser
+- test(api): 补充 createUser 单测
+- docs(api): 更新 API 文档
+
+### 已知遗留
+- 密码强度校验待补充(下阶段)
+- 邮件通知未接入(下下阶段)
+─────────────────────────────────────────────────
+字符数:750 — FATAL
+
+
+✅ 正例:精简 summary(287 chars,远低于 500)
+─────────────────────────────────────────────────
+决策:TS + Node + PG(类型安全 + 生态成熟)
+文件:src/api/users.ts(createUser 实现) + tests/api/users.test.ts
+Commit:abc1234,def5678
+Gate:Gate 1 通过(methodology=real)
+遗留:密码强度校验 / 邮件通知 — 留给 Phase 03
+─────────────────────────────────────────────────
+字符数:287 — PASS
+```
+
+### 4. 边界场景
+
+| 场景 | 行为 |
+|------|------|
+| `summary.md` 不存在 | exit code 2(提示用户先写) |
+| `summary.md` 是空文件 | exit code 4(空文件,无内容可校验) |
+| `summary.md` 不是 UTF-8 | exit code 3(编码错误,无法按字符计数) |
+| 字符数 ≤ 500 | exit code 0,stdout: `✅ summary.md is X chars (≤500)` |
+| 字符数 > 500 | exit code 1,stderr: 实际字符数 + 前 100 字符预览(辅助用户定位冗余) |
+
+> **设计权衡**:`--resume` 模式下,orchestrator 需要快速判断"哪些 phase 已完成 / 哪些
+> summary.md 存在 / 哪些超长"——validate-summary 单独命令让这个检查可程序化调用,
+> 不必每次都重读 SKILL.md 找上限。
 
 ## Verification Protocol (Orchestrator-Direct)
 
@@ -1193,6 +1293,7 @@ node ~/.agents/skills/atdo/scripts/phase-state.js inc-strike <id> <type>  # Incr
 node ~/.agents/skills/atdo/scripts/phase-state.js get-strikes [phaseId]  # Query strike counts
 node ~/.agents/skills/atdo/scripts/phase-state.js record-commit <id> <h[,h,...]>  # Record commit hash(es),comma-separated supported
 node ~/.agents/skills/atdo/scripts/phase-state.js summary                 # State summary
+node ~/.agents/skills/atdo/scripts/phase-state.js validate-summary <phaseId>  # Validate summary.md length (Bug-10, ≤500 chars)
 
 # Safety
 node ~/.agents/skills/atdo/scripts/phase-state.js lock                                                      # 获取锁

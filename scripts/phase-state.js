@@ -13,6 +13,7 @@
  *   node phase-state.js record-commit <phaseId> <hash[,hash,...]>  记录 commit hash(支持单 hash 或 comma-separated 多 hash)
  *   node phase-state.js record-confirm <phaseId> <decision>        追加 userConfirmation(Bug-07,decision: c|s|a)
  *   node phase-state.js has-confirm <phaseId>                      检查 phase 是否已确认(exit 0=是, 1=否,Bug-07)
+ *   node phase-state.js validate-summary <phaseId>                 校验 phase summary.md 长度(Bug-10,≤500 chars,exit 0=PASS / 1=超长 / 2=不存在 / 3=非 UTF-8 / 4=空文件)
  *   node phase-state.js lock                      获取锁
  *   node phase-state.js unlock --reason=<r>       释放锁(Bug-08:必须带 --reason,合法值 all-completed|aborted|alert)
  *   node phase-state.js check-disk                磁盘空间检查
@@ -49,6 +50,11 @@ const VALID_STATUSES = [
 ];
 const ACTIVE_STATUSES = ['pending', 'in_progress', 'executed', 'audited', 'fixed', 'gated', 'awaiting_user_review'];
 const STRIKE_THRESHOLDS = { phaseRetry: 3, regression: 2, sameCategory: 5 };
+
+// Bug-10:summary.md 字符数上限(中文字符按 1 char 计,不按字节)
+// 硬约束 — 超 500 chars → FATAL,要求重写
+// 与 SKILL.md "summary.md 长度约束 (Bug-10)" 章节保持同步
+const SUMMARY_MAX_CHARS = 500;
 
 // Bug-06:状态机合法转换表
 //   - 每个阶段的 status 只能从一组特定的来源状态进入
@@ -834,6 +840,72 @@ function cmdHasConfirm() {
   }
 }
 
+// ─── summary.md 长度校验 (Bug-10) ──────────────────────────
+// 协议:每个 phase 的 .phase-execution/phases/<phaseId>/summary.md
+//      字符数 ≤ SUMMARY_MAX_CHARS(= 500),中文字符按 1 char 计
+// orchestrator 在 phase 收尾写完 summary.md 后立即调此命令校验
+//
+// 退出码:
+//   0 — 字符数 ≤ 500,stdout 输出"✅ summary.md is X chars (≤500)"
+//   1 — 字符数 > 500,stderr 输出实际字符数 + 前 100 字符预览
+//   2 — summary.md 文件不存在
+//   3 — 文件不是 UTF-8(无法按字符计数)
+//   4 — 文件为空
+//
+// 字符数统计:JS text.length(UTF-16 code unit),与文件字节数无关
+// 边界:500 字符正好是 500 chars(含),即 length === 500 → PASS
+function cmdValidateSummary() {
+  const phaseId = args[0];
+  if (!phaseId) die('validate-summary 需要 phaseId 作为第一个参数');
+  // phaseId 引用存在性(防止 phaseId 拼写错误时读非预期路径)
+  const state = readState();
+  if (!state.phases.find(p => p.number === phaseId)) {
+    die(`validate-summary: 阶段 ${phaseId} 不存在`);
+  }
+  // 路径:与 SKILL.md Step 9 写 summary 的 heredoc 路径保持一致
+  // 实际位置:.phase-execution/phases/<phaseId>/summary.md
+  const summaryPath = path.join('.phase-execution', 'phases', phaseId, 'summary.md');
+  if (!fs.existsSync(summaryPath)) {
+    process.stderr.write(`[phase-state] validate-summary: ${summaryPath} 不存在。请先在 Step 9 写完 summary.md 再校验。\n`);
+    process.exit(2);
+  }
+  // 读文件 + UTF-8 校验 + 字符数统计
+  // Node.js fs.readFileSync 默认 'utf8' 编码:若文件不是合法 UTF-8,会输出替换字符 �
+  // 这里检测替换字符数量,>0 视为非 UTF-8(exit 3)
+  let content;
+  try {
+    const buf = fs.readFileSync(summaryPath);
+    content = buf.toString('utf8');
+    // 校验 UTF-8 有效性:替换字符 U+FFFD 的出现暗示原始字节不是合法 UTF-8
+    if (content.includes('�')) {
+      process.stderr.write(`[phase-state] validate-summary: ${summaryPath} 不是合法 UTF-8 文件(包含替换字符)\n`);
+      process.exit(3);
+    }
+  } catch (e) {
+    process.stderr.write(`[phase-state] validate-summary: 读取 ${summaryPath} 失败: ${e.message}\n`);
+    process.exit(3);
+  }
+  // 空文件检测(content.trim() 为空,含纯空白)
+  if (content.trim() === '') {
+    process.stderr.write(`[phase-state] validate-summary: ${summaryPath} 是空文件。请写入本阶段总结(关键决策 / commit hash / 已知遗留)\n`);
+    process.exit(4);
+  }
+  // 字符数统计:text.length(JS UTF-16 code unit)—— 中文字符按 1 char 计
+  const charCount = content.length;
+  if (charCount > SUMMARY_MAX_CHARS) {
+    // 超长:输出实际字符数 + 前 100 字符预览(辅助用户定位冗余)
+    // 预览:取前 100 chars,过长部分加省略号
+    const preview = content.length > 100
+      ? content.slice(0, 100) + '...'
+      : content;
+    process.stderr.write(`[phase-state] validate-summary: ${summaryPath} 超长 (${charCount} chars > ${SUMMARY_MAX_CHARS})。请精简,删除详细日志 / 代码片段 / 装饰符,只保留关键决策 + commit hash + 已知遗留。\n`);
+    process.stderr.write(`前 100 字符预览:\n${preview}\n`);
+    process.exit(1);
+  }
+  // PASS
+  process.stdout.write(`✅ summary.md is ${charCount} chars (≤${SUMMARY_MAX_CHARS})`);
+}
+
 // ─── 入口 ────────────────────────────────────────────────
 
 const commands = {
@@ -846,6 +918,7 @@ const commands = {
   'record-commit': cmdRecordCommit,
   'record-confirm': cmdRecordConfirm,  // Bug-07
   'has-confirm': cmdHasConfirm,        // Bug-07
+  'validate-summary': cmdValidateSummary,  // Bug-10
   lock: () => { process.stdout.write(JSON.stringify(acquireLock())); },
   unlock: cmdUnlock,
   'check-disk': () => { process.stdout.write(JSON.stringify(checkDisk())); },
