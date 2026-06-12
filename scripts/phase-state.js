@@ -659,6 +659,19 @@ ${formatTransitionTable()}
   process.stdout.write(JSON.stringify({ ok: true, phase: phaseId, status, currentPhaseIndex: state.currentPhaseIndex }));
 }
 
+// P2-5: 抽 helper — 从 currentPhaseIndex 起找第一个 !== completed 的 phase
+// cmdGetCurrentPhase 用它做游标推进,cmdSummary 用它做"当前阶段"读出
+// DRY:两边共用同一游标推进逻辑,未来调整(例:跳过 user-review-fail)只改一处
+function findCurrentPhase(state) {
+  const startIdx = state.currentPhaseIndex || 0;
+  for (let i = startIdx; i < state.phases.length; i++) {
+    if (state.phases[i].status !== 'completed') {
+      return { phase: state.phases[i], index: i };
+    }
+  }
+  return { phase: null, index: startIdx };
+}
+
 function cmdGetCurrentPhase() {
   const state = readState();
 
@@ -666,17 +679,12 @@ function cmdGetCurrentPhase() {
   // 编排器每完成一阶段调用 set-phase ... completed,游标才前进
   // 中间态(executed/audited/fixed/gated)被识别为"还在做",不前进游标
   // P2-E: 只在游标实际变化时写盘(性能优化 — 5 次 get 不再触发 5 次备份轮转)
-  const startIdx = state.currentPhaseIndex || 0;
-  let phase = null;
+  const { phase, index } = findCurrentPhase(state);
   let cursorChanged = false;
-  for (let i = startIdx; i < state.phases.length; i++) {
-    if (state.phases[i].status !== 'completed') {
-      phase = state.phases[i];
-      if (i !== state.currentPhaseIndex) {
-        state.currentPhaseIndex = i;
-        cursorChanged = true;
-      }
-      break;
+  if (phase) {
+    if (index !== state.currentPhaseIndex) {
+      state.currentPhaseIndex = index;
+      cursorChanged = true;
     }
   }
 
@@ -880,15 +888,8 @@ function cmdSummary() {
   const state = readState();
   const completed = state.phases.filter(p => p.status === 'completed').length;
   const total = state.phases.length;
-  // 与 cmdGetCurrentPhase 保持一致:用 currentPhaseIndex 找第一个 !== completed
-  const startIdx = state.currentPhaseIndex || 0;
-  let current = null;
-  for (let i = startIdx; i < state.phases.length; i++) {
-    if (state.phases[i].status !== 'completed') {
-      current = state.phases[i];
-      break;
-    }
-  }
+  // P2-5: 与 cmdGetCurrentPhase 共用 findCurrentPhase helper
+  const { phase: current } = findCurrentPhase(state);
   process.stdout.write(JSON.stringify({
     completed,
     total,
