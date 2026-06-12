@@ -279,6 +279,41 @@ describe('get-current-phase 单调推进', () => {
   });
 });
 
+describe('P1-2: get-current-phase awaiting_user_review 字段', () => {
+  let dir;
+  before(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-test-'));
+    initPlan(dir, JSON.stringify({ phases: [
+      { number: '01', name: 'a', isGate: true, gate: 'manual' },
+    ]}));
+  });
+  after(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+
+  test('awaiting_user_review 时返回 awaitingUserReview: true + gateType: manual', () => {
+    // 把 01 推进到 awaiting_user_review 状态
+    runIn(dir, 'set-phase', '01', 'in_progress');
+    runIn(dir, 'set-phase', '01', 'executed');
+    runIn(dir, 'set-phase', '01', 'audited');
+    runIn(dir, 'set-phase', '01', 'fixed');
+    runIn(dir, 'set-phase', '01', 'gated');
+    runIn(dir, 'set-phase', '01', 'awaiting_user_review');
+    const r = runIn(dir, 'get-current-phase');
+    assert.match(r.stdout, /"status":\s*"awaiting_user_review"/);
+    assert.match(r.stdout, /"awaitingUserReview":\s*true/);
+    assert.match(r.stdout, /"gateType":\s*"manual"/);
+  });
+
+  test('非 awaiting_user_review 时不包含 awaitingUserReview 字段', () => {
+    const d2 = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-test-'));
+    initPlan(d2, JSON.stringify({ phases: [
+      { number: '01', name: 'a' },
+    ]}));
+    const r = runIn(d2, 'get-current-phase');
+    assert.doesNotMatch(r.stdout, /"awaitingUserReview"/);
+    fs.rmSync(d2, { recursive: true, force: true });
+  });
+});
+
 describe('inc-strike 三维度 + 参数校验', () => {
   let dir;
   before(() => {

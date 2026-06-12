@@ -686,7 +686,7 @@ function cmdGetCurrentPhase() {
   }
 
   if (cursorChanged) writeState(state);
-  process.stdout.write(JSON.stringify({
+  const result = {
     number: phase.number,
     name: phase.name,
     goal: phase.goal,
@@ -695,7 +695,14 @@ function cmdGetCurrentPhase() {
     status: phase.status,
     totalPhases: state.phases.length,
     index: state.currentPhaseIndex,
-  }));
+  };
+  // P1-2: 协议承诺 awaiting_user_review 时返回 awaitingUserReview: true
+  // orchestrator 据此判断 "manual gate 期间,等用户答复" 而非解析 status 字符串
+  if (phase.status === 'awaiting_user_review') {
+    result.gateType = 'manual';
+    result.awaitingUserReview = true;
+  }
+  process.stdout.write(JSON.stringify(result));
 }
 
 function cmdIncStrike() {
