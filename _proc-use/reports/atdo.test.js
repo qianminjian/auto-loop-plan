@@ -2703,5 +2703,47 @@ describe('F-01 Tier 3.5 任务列表型 plan 解析', () => {
         assert.ok(state.phases[0].tasks.some(t => t.includes('任务 C')));
       } finally { fs.rmSync(d, { recursive: true, force: true }); }
     });
+
+    // P3-22: F-01 任务列表型 plan 的 E2E 集成 — 解析后走完 phase 流程 + record-commit
+    test('P3-22: 任务列表型 plan → 走完 phase 1 完整流程 + record-commit + done', () => {
+      const d = freshDir();
+      try {
+        // 1. 解析任务列表型 plan(markdown stdin)
+        const child = spawnSync('node', [SCRIPT, 'init'], {
+          input: SAMPLE_MD,
+          encoding: 'utf8',
+          cwd: d,
+          env: { ...process.env, FORCE_COLOR: '0' },
+        });
+        assert.equal(child.status, 0, `init 应成功,stderr: ${child.stderr}`);
+        const stateFile = path.join(d, '.phase-execution/state.json');
+        let state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+        assert.equal(state.phases.length, 3);
+        // 2. 走完 phase 1 完整状态机
+        //   pending → in_progress → executed → audited → fixed → gated → completed
+        runIn(d, 'set-phase', '01', 'in_progress');
+        runIn(d, 'set-phase', '01', 'executed');
+        runIn(d, 'set-phase', '01', 'audited');
+        runIn(d, 'set-phase', '01', 'fixed');
+        runIn(d, 'set-phase', '01', 'gated');
+        runIn(d, 'set-phase', '01', 'completed');
+        // 3. record-commit 写入假 hash(Bug-03 comma-separated)
+        const r1 = runIn(d, 'record-commit', '01', 'abc123def,def456abc');
+        assert.equal(r1.code, 0, `record-commit 应成功,stderr: ${r1.stderr}`);
+        // 4. 验证 state.json:phase 01 已 completed,commits 含 2 hash
+        state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+        const phase1 = state.phases.find(p => p.number === '01');
+        assert.equal(phase1.status, 'completed');
+        assert.equal(phase1.commits.length, 2);
+        assert.ok(phase1.commits.includes('abc123def'));
+        assert.ok(phase1.commits.includes('def456abc'));
+        // 5. 游标应推进到 02
+        assert.equal(state.currentPhaseIndex, 1);
+        // 6. get-current-phase 应返 02(游标未到 03)
+        const r2 = runIn(d, 'get-current-phase');
+        assert.match(r2.stdout, /"number":\s*"02"/);
+        assert.match(r2.stdout, /"status":\s*"pending"/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
   });
 });
