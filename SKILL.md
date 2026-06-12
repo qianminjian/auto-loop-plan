@@ -33,6 +33,13 @@ After each phase: persist state → CronCreate (durable) → next turn continues
 ### Trust Nothing Principle
 Agent output is UNTRUSTED. Every claim must be independently verified by the orchestrator (you) using direct shell commands. See Verification Protocol below.
 
+### Working Directory Discipline (P1-3)
+Agent execution may change shell cwd. To prevent "No such file or directory" errors:
+- Every orchestrator Bash command MUST be prefixed with `cd $PROJECT_ROOT &&` or use absolute paths.
+- `PROJECT_ROOT` is read from `state.json.projectRoot` at turn start.
+- All CI scripts MUST derive their own `SCRIPT_DIR` and work relative to it — never rely on `$PWD`.
+- Before each Step (0-9), the orchestrator MUST verify: `[ "$(pwd)" = "$PROJECT_ROOT" ]` or `cd "$PROJECT_ROOT"`.
+
 ### Process File Containment Policy (PROJECT POLICY)
 
 > Defines the constant **`PROCESS_FILE_POLICY`**, prepended to the task
@@ -45,9 +52,16 @@ Agent output is UNTRUSTED. Every claim must be independently verified by the orc
 
 **PROCESS_FILE_POLICY** — canonical definition. The orchestrator MUST
 copy the code block below verbatim into every spawn prompt (Step 2/4/5/7)
-at the marker `<<INJECT: copy the verbatim PROCESS_FILE_POLICY code block
-from Core Rules>>`. Do not summarize, paraphrase, or shorten — LLM context
-decay across turns is precisely why we re-inject the full text every time.
+at the marker `<<INJECT: PROCESS_FILE_POLICY>>`. Do not summarize,
+paraphrase, or shorten — LLM context decay across turns is precisely why
+we re-inject the full text every time.
+
+**Injection format** — wrap the code block with explicit boundaries so
+orchestrators don't guess whether to include/exclude markdown fences:
+
+```
+[INJECTION START — PROCESS_FILE_POLICY]
+```
 
 ```
 [项目政策 — 过程文件隔离,强制执行]
@@ -80,6 +94,65 @@ License、IDE 配置。CI 配置统一放 .github/。
 完成本阶段后,自查:本阶段新增文件是否全在合法位置?根目录是否
 无新孤儿?
 ```
+
+```
+[INJECTION END — PROCESS_FILE_POLICY]
+```
+
+### ATDO Bug Report Duty (MANDATORY per phase)
+
+> **P0-1 修复**:agent 在遇到 atdo 工具本身的问题时不主动记录,
+> 导致 `_proc-use/_bug-info/` 全空,无法迭代改进工具。
+
+Every spawned agent (gsd-executor / gsd-code-reviewer / gsd-code-fixer
+/ gsd-integration-checker) MUST self-check at phase end:
+
+**ATDO BUG REPORT DUTY** — inject this block into every agent spawn
+prompt, immediately after PROCESS_FILE_POLICY:
+
+```
+[INJECTION START — ATDO BUG REPORT DUTY]
+[ATDO 工具问题报告义务 — 强制执行]
+
+本阶段结束时,自查:是否遇到 atdo 工具本身的问题?如有,写入
+_proc-use/_bug-info/atdo-{phaseId}-{category}.md。
+
+atdo 问题分类(遇到任一类都应报告):
+  - state-machine  : 状态机拒绝合法操作/状态转换异常
+  - ci-job         : CI 脚本误报/漏报/假阳/假阴
+  - path           : 路径解析错误/工作目录漂移/找不到文件
+  - lock           : 锁获取失败/stale lock 未清理/并发冲突
+  - plan-parsing   : 计划解析错误/阶段识别失败/Tier 选择异常
+  - agent-spawn    : agent 启动失败/超时/输出格式异常
+  - context-budget : 上下文溢出/plan-snippet 超长
+
+判定标准:问题出在 atdo 工具本身(而非你的业务代码),且影响了
+你的执行效率或正确性 → 必须报告。
+
+报告格式:
+  # atdo 问题: {简述}
+  - 阶段: {phaseId}
+  - 分类: {category}
+  - 现象: {实际发生了什么}
+  - 影响: {对你的执行造成了什么影响}
+  - 建议: {你期望 atdo 如何改进}
+
+不报告 = 问题消失,atdo 无法迭代。agent 的 success criteria 包含
+此义务——不报告属于任务未完成。
+[INJECTION END — ATDO BUG REPORT DUTY]
+```
+
+The orchestrator MUST re-inject this block into EVERY agent spawn prompt
+(Step 2/4/5/7). The injection order is:
+1. `[INJECTION START — PROCESS_FILE_POLICY]` ... `[INJECTION END — PROCESS_FILE_POLICY]`
+2. `[INJECTION START — ATDO BUG REPORT DUTY]` ... `[INJECTION END — ATDO BUG REPORT DUTY]`
+3. Task-specific instructions
+
+> **P3-1 性能提示**:PROCESS_FILE_POLICY + ATDO BUG REPORT DUTY 合计 ~1.5K
+> tokens,每次注入增加 agent 首次响应延迟。长期优化方向:将这两个 block
+> 缓存到 agent skill-level context 前缀中(类似 system prompt),而非每次
+> 在 task prompt 中注入。当前(2026-06)每次注入是正确的工程选择(简单优先),
+> 因为 Claude Code 尚无 skill-level context prefix 机制。
 
 ## 过程文件命名与位置规范 (Bug-11)
 
@@ -202,6 +275,10 @@ bash scripts/watchdog.sh cleanup
 
 # 0c. Disk space check
 node scripts/phase-state.js check-disk  # ≥500MB free
+
+# 0d. Ensure _bug-info directory exists (P2-1)
+#     agent 在遇到 atdo 工具问题时写入此目录,Step 3 verification 检查
+mkdir -p _proc-use/_bug-info
 ```
 If any check fails → write ALERT.md, exit. Do NOT auto-fix environment issues.
 
@@ -570,7 +647,8 @@ After startup, find the first phase with status `pending` or `in_progress`. Proc
 **2. Agent Execution**
 Spawn gsd-executor agent with this prompt structure:
 ```
-<<INJECT: copy the verbatim PROCESS_FILE_POLICY code block from Core Rules>>
+<<INJECT: PROCESS_FILE_POLICY>>
+<<INJECT: ATDO BUG REPORT DUTY>>
 ────────────────────────────────────────
 (以下是你本阶段的任务)
 
@@ -628,13 +706,26 @@ grep -rE 'sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{20,}|AKIA[A-Z0-9]{16}' --exclude-d
 Any verification failure → trigger fix loop (step 5).
 Record findings to execution-log.md.
 
+**3f. Bug report compliance check (P0-1)**:
+```bash
+# 检查本阶段 agent 是否向 _bug-info 写了报告
+# 如果 _proc-use/_bug-info/ 下无本阶段新文件,输出 WARN(不阻断)
+NEW_BUGS=$(find _proc-use/_bug-info -name "atdo-${phaseId}-*.md" -newer .phase-execution/state.json 2>/dev/null || true)
+if [ -z "$NEW_BUGS" ]; then
+  echo "[WARN] 本阶段 agent 未向 _proc-use/_bug-info/ 写入 atdo 工具问题报告。"
+  echo "       如果 agent 确实没遇到 atdo 问题,此 WARN 可忽略。"
+  echo "       如果 agent 遇到了但未报告,下阶段 prompt 中 ATDO BUG REPORT DUTY 会再次提醒。"
+fi
+```
+
 **4. Agent Audit** (unless `--no-audit` flag is set)
 
 > **P1-4 协议明确**:`--no-audit` 仅跳过"agent audit 报告生成"(不 spawn gsd-code-reviewer),但状态机 **必须** 仍走 `executed → audited`(orchestrator 在该模式下直接 `set-phase ... audited`,不依赖 audit 报告)。这样 `--no-audit` 与 Bug-06 严格状态机无矛盾:状态机推进不停,只是少一个 agent spawn。
 
 Spawn gsd-code-reviewer agent:
 ```
-<<INJECT: copy the verbatim PROCESS_FILE_POLICY code block from Core Rules>>
+<<INJECT: PROCESS_FILE_POLICY>>
+<<INJECT: ATDO BUG REPORT DUTY>>
 ────────────────────────────────────────
 (以下是审计任务)
 
@@ -655,7 +746,8 @@ After agent returns:
 For each BLOCKER in audit-report, spawn gsd-code-fixer with the standard
 policy prepended:
 ```
-<<INJECT: copy the verbatim PROCESS_FILE_POLICY code block from Core Rules>>
+<<INJECT: PROCESS_FILE_POLICY>>
+<<INJECT: ATDO BUG REPORT DUTY>>
 ────────────────────────────────────────
 (以下是修复任务)
 
@@ -697,7 +789,8 @@ If NOT a gate: skip to step 8 (completion).
 
 Spawn gsd-integration-checker agent:
 ```
-<<INJECT: copy the verbatim PROCESS_FILE_POLICY code block from Core Rules>>
+<<INJECT: PROCESS_FILE_POLICY>>
+<<INJECT: ATDO BUG REPORT DUTY>>
 ────────────────────────────────────────
 (以下是关口集成测试)
 
@@ -936,8 +1029,9 @@ continue   │
 ```
 pending              → in_progress
 in_progress          → executed
-executed             → audited
+executed             → audited | verified       (P1-4: verification phase 可走 verified)
 audited              → fixed
+verified             → gated                    (P1-4: verification → gated 直通)
 fixed                → gated
 gated                → completed              (auto gate 直通)
 gated                → awaiting_user_review   (manual/hybrid gate 入口)
@@ -1009,14 +1103,20 @@ completed            → (终态)
 [in_progress]
    │  set-phase executed
    ▼
-[executed]
-   │  set-phase audited
-   ▼
-[audited]
-   │  set-phase fixed
-   ▼
-[fixed]
-   │  set-phase gated
+[executed] ─── set-phase verified (verification phase 快速路径,P1-4) ──┐
+   │                                                                    │
+   │  set-phase audited (implementation phase 标准路径)                 │
+   ▼                                                                    │
+[audited]                                                               │
+   │  set-phase fixed                                                   │
+   ▼                                                                    │
+[fixed]                                                                 │
+   │  set-phase gated                                                   │
+   ▼                                                                    │
+[verified] (verification 快速路径)                                       │
+   │  set-phase gated                                                   │
+   └──────────────────────────────────────────────────────────────────┘
+   │
    ▼
 [gated] ─── set-phase completed (auto gate 直通) ──────────────┐
    │                                                             │
@@ -1036,6 +1136,51 @@ completed            → (终态)
    ▼
 [user-review-fail]  (终态,触发 ALERT)
 ```
+
+### Verification Phase (P1-4)
+
+> **背景**:阶段 00(完备性检查)是纯验证阶段,无新代码产出。但仍需走
+> `executed → audited → fixed → gated → completed` 全状态链,其中
+> `audited` 和 `fixed` 语义不合理(没有代码可审计/修复)。
+
+**1. `phaseType` 字段**(phase schema 扩展)
+
+```jsonc
+{
+  "phases": [
+    { "name": "Phase 01", "tasks": ["..."], "phase_type": "implementation" },  // 默认
+    { "name": "完备性检查", "tasks": ["..."], "phase_type": "verification" }    // 快速路径
+  ]
+}
+```
+
+| 取值 | 含义 | 状态路径 |
+|------|------|---------|
+| `implementation`(默认) | 标准实现阶段 | pending → in_progress → executed → audited → fixed → gated → completed |
+| `verification` | 纯验证阶段,无新代码产出 | pending → in_progress → executed → **verified** → gated → completed |
+
+**字段别名**(plan 输入兼容写法,phase-state.js init 接受):
+- 标准:`phaseType` (camelCase)
+- 别名:`phase_type` (snake_case)
+- 缺省:`implementation`(向后兼容,旧 plan 无此字段时走标准路径)
+
+**2. 新状态 `verified`**
+
+| Status | 进入来源 | 离开目标 | 语义 |
+|--------|---------|---------|------|
+| `verified` | `executed`(verification phase) | `gated` | 独立验证通过,跳过审计/修复 |
+
+**3. orchestrator 行为**
+
+- phase.phaseType === 'verification' → `executed` 后直接 `set-phase ... verified`,跳过 Step 4(Agent Audit)和 Step 5(Fix Loop)
+- phase.phaseType === 'implementation' → 标准路径,无变化
+- `verified` → `gated` 的转换与 `fixed` → `gated` 完全等价,后续 Step 6-9 无差异
+
+**4. 向后兼容**
+
+- 旧 plan 无 `phase_type` → 默认 `implementation`,行为不变
+- 旧 state.json 无 `phaseType` 字段 → phase-state.js 把它当 `implementation` 处理
+- 状态机新增 `verified` 状态不影响现有 `executed → audited` 路径
 
 **9. Phase Completion + Continuation**
 
@@ -1069,6 +1214,21 @@ find .phase-execution/phases/<phaseId> -maxdepth 1 -name '*.log' -exec mv {} .ph
 - Call the **CronCreate** tool (NOT ScheduleWakeup — that requires /loop
   dynamic mode and silently fails in standard invocations. See
   `_proc-use/buginfo/atdo-schedulewakeup-tool-mismatch-2026-06-11.md`).
+
+- **P2-4: CronCreate in continuous execution mode** — Even when the user
+  chose "连续执行"(c + "不要再和我确认"),CronCreate MUST still be called
+  after EACH phase completion. Rationale:
+  - CronCreate is the **insurance policy** — if the session crashes mid-chain,
+    the cron will fire and resume from the last completed phase.
+  - In continuous mode, the orchestrator checks for an existing pending cron
+    BEFORE starting the next phase. If a cron already exists (from a previous
+    phase), the orchestrator may skip creating a new one — but must verify
+    the existing cron points to the correct next phase.
+  - The cron is **not** the continuation path during normal continuous
+    execution — the orchestrator continues directly in-session. The cron
+    only fires if the session terminates abnormally.
+  - When the session completes normally (all phases done), the final step
+    MUST clean up any remaining cron entries via `CronList` + `CronDelete`.
   CronCreate is cross-session (durable: true) and works without /loop.
   Minimum granularity is 1 minute (no 270s equivalent).
 
@@ -1478,6 +1638,7 @@ node ~/.agents/skills/atdo/scripts/phase-state.js record-confirm <phaseId> <c|s|
 node ~/.agents/skills/atdo/scripts/phase-state.js has-confirm <phaseId>           # Check if phase confirmed (Bug-07, LIFO)
 node ~/.agents/skills/atdo/scripts/phase-state.js summary                 # State summary
 node ~/.agents/skills/atdo/scripts/phase-state.js validate-summary <phaseId>  # Validate summary.md length (Bug-10, ≤500 chars)
+node ~/.agents/skills/atdo/scripts/phase-state.js generate-summary-template <phaseId>  # Output summary.md template (P3-4)
 
 # Safety
 node ~/.agents/skills/atdo/scripts/phase-state.js lock                                                      # 获取锁

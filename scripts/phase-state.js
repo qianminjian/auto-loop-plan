@@ -14,6 +14,7 @@
  *   node phase-state.js record-confirm <phaseId> <decision>        追加 userConfirmation(Bug-07,decision: c|s|a)
  *   node phase-state.js has-confirm <phaseId>                      检查 phase 是否已确认(exit 0=是, 1=否,Bug-07)
  *   node phase-state.js validate-summary <phaseId>                 校验 phase summary.md 长度(Bug-10,≤500 chars,exit 0=PASS / 1=超长 / 2=不存在 / 3=非 UTF-8 / 4=空文件)
+ *   node phase-state.js generate-summary-template <phaseId>         输出 summary.md 统一模板(P3-4)
  *   node phase-state.js lock                      获取锁
  *   node phase-state.js unlock --reason=<r>       释放锁(Bug-08:必须带 --reason,合法值 all-completed|aborted|alert)
  *   node phase-state.js check-disk                磁盘空间检查
@@ -47,8 +48,10 @@ const VALID_STATUSES = [
   'pending', 'in_progress', 'executed', 'audited', 'fixed', 'gated', 'completed',
   // Bug-06:manual gate 专用中间态(见 SKILL.md "Manual Gate Protocol")
   'awaiting_user_review', 'user-review-pass', 'user-review-fail',
+  // P1-4:verification phase 快速路径(跳过 audited/fixed,见 SKILL.md "Verification Phase")
+  'verified',
 ];
-const ACTIVE_STATUSES = ['pending', 'in_progress', 'executed', 'audited', 'fixed', 'gated', 'awaiting_user_review'];
+const ACTIVE_STATUSES = ['pending', 'in_progress', 'executed', 'audited', 'fixed', 'gated', 'awaiting_user_review', 'verified'];
 // P2-15: 同一 phase 最多累积的确认条数(防 LLM 幻觉 / 恶意循环调用导致 state.json 爆炸)
 const MAX_CONFIRMATIONS_PER_PHASE = 10;
 const STRIKE_THRESHOLDS = { phaseRetry: 3, regression: 2, sameCategory: 5 };
@@ -67,9 +70,10 @@ const ALLOWED_TRANSITIONS = {
   // 标准自动流程
   'pending':              ['in_progress'],
   'in_progress':          ['executed'],
-  'executed':             ['audited'],
+  'executed':             ['audited', 'verified'],  // P1-4: verification phase 可跳过 audited
   'audited':              ['fixed'],
   'fixed':                ['gated'],
+  'verified':             ['gated'],                // P1-4: verification → gated 直通
   'gated':                ['completed', 'awaiting_user_review'],  // auto → completed;manual → awaiting_user_review
   // Bug-06:manual gate 流程(gated 进入 manual gate 后必须经此路径离开)
   'awaiting_user_review': ['user-review-pass', 'user-review-fail'],
@@ -541,6 +545,12 @@ function cmdInit() {
       //   hybrid: agent 报告 + orchestrator 自动化检查 + 用户最终签字
       // 输入字段:gate_type(下划线,plan 风格) / gateType(camelCase)
       gateType: p.gate_type || p.gateType || 'auto',
+      // P1-4:phase 类型标识 — implementation / verification
+      //   implementation(默认):标准流程 pending → in_progress → executed → audited → fixed → gated → completed
+      //   verification:        快速路径 pending → in_progress → executed → verified → gated → completed
+      //                        跳过 audited/fixed(纯验证阶段无新代码产出,无需审计/修复)
+      // 输入字段:phase_type(下划线,plan 风格) / phaseType(camelCase)
+      phaseType: p.phase_type || p.phaseType || 'implementation',
       status: 'pending',
       commits: [],
       commitHash: null,  // 兼容字段:最后一个 commit 的 hash(单 hash 场景与多 hash 场景共用)
@@ -691,6 +701,11 @@ ${formatTransitionTable()}
   if (TERMINAL_STATUSES.includes(currentStatus) && currentStatus !== status) {
     die(`阶段 ${phaseId} 已是终态 "${currentStatus}",不可再转换。终态列表: ${TERMINAL_STATUSES.join(', ')}`);
   }
+  // P1-4: verification 快速路径仅限 phaseType='verification' 的 phase
+  // 防止 orchestrator 误操作将 implementation phase 送入 verified 状态,跳过 audit/fix
+  if (status === 'verified' && (phase.phaseType || 'implementation') !== 'verification') {
+    die(`阶段 ${phaseId} phaseType="${phase.phaseType || 'implementation'}",不允许进入 verified 状态。只有 phaseType="verification" 的纯验证阶段才能走此快速路径。implementation 阶段请走 audited → fixed 标准路径。`);
+  }
   phase.status = status;
   phase.updatedAt = new Date().toISOString();
   phase.statusSince = new Date().toISOString();
@@ -766,6 +781,8 @@ function cmdGetCurrentPhase() {
     // P2-6: ACTIVE_STATUSES 真正投入使用 — 标记 phase 是否处于"活跃中间态"
     // orchestrator 据此判断"phase 还在做事"还是"已完成/已失败",不再依赖 status 字符串
     isActive: ACTIVE_STATUSES.includes(phase.status),
+    // P1-4: 返回 phaseType 让 orchestrator 判断应走标准路径还是 verification 快速路径
+    phaseType: phase.phaseType || 'implementation',
     totalPhases: state.phases.length,
     index: state.currentPhaseIndex,
   };
@@ -908,7 +925,22 @@ function cmdRecordCommit() {
     }
   }
   // 2) 任何 hash 不符合 7-40 位 hex 字符 → 拒绝(精确指出位置)
+  // 但 "HEAD"(大小写不敏感)是例外 — P1-2: 解析为当前 HEAD 的完整 hash
   const HASH_RE = /^[a-f0-9]{7,40}$/i;
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i].toUpperCase() === 'HEAD') {
+      try {
+        const { execFileSync } = require('child_process');
+        const resolved = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 5000 }).trim();
+        if (!HASH_RE.test(resolved)) {
+          die(`record-commit: 无法解析 HEAD → "${resolved}" 不匹配 7-40 位 hex 字符`);
+        }
+        parts[i] = resolved;
+      } catch (e) {
+        die(`record-commit: 无法解析 HEAD(git rev-parse 失败): ${e.message}`);
+      }
+    }
+  }
   for (let i = 0; i < parts.length; i++) {
     if (!HASH_RE.test(parts[i])) {
       die(`无效的 commit hash: 位置 ${i + 1} 的 "${parts[i]}" 不匹配 7-40 位 hex 字符(原始参数: "${raw}")。正确格式: "hash1,hash2,hash3",例:32db291,3c79edb,078de4c`);
@@ -1272,6 +1304,29 @@ function cmdComparePlanHash() {
   }
 }
 
+// ─── summary 模板生成 (P3-4) ──────────────────────────────
+// 协议:每个 phase 收尾写 summary.md 时,orchestrator 手写 heredoc 格式不一致
+//   此命令输出统一模板,orchestrator 填充后写入 summary.md
+// 模板遵循 SKILL.md "summary.md 长度约束" 的取舍规则:
+//   应该写:关键决策/commit hash/文件路径/已知遗留
+//   不应该写:详细日志/代码片段/LLM 推理过程/装饰符
+// 输出:纯文本模板(orchestrator 用 heredoc 写入 summary.md 前先过目)
+function cmdGenerateSummaryTemplate() {
+  const phaseId = args[0];
+  if (!phaseId) die('generate-summary-template 需要 phaseId 作为参数');
+  const state = readState();
+  const phase = state.phases.find(p => p.number === phaseId);
+  if (!phase) die(`阶段 ${phaseId} 不存在`);
+  const template = [
+    `决策: <本阶段关键决策,如架构选型/拒绝的方案>`,
+    `文件: <修改的文件路径,逗号分隔>`,
+    `Commit: <commit hash>`,
+    `Gate: ${phase.isGate ? '关口通过' : '非关口'}(methodology=<proxy|real|mixed>)`,
+    `遗留: <已知未完成项,留给后续阶段>`,
+  ].join('\n');
+  process.stdout.write(template);
+}
+
 // ─── 入口 ────────────────────────────────────────────────
 
 const commands = {
@@ -1285,6 +1340,7 @@ const commands = {
   'record-confirm': cmdRecordConfirm,  // Bug-07
   'has-confirm': cmdHasConfirm,        // Bug-07
   'validate-summary': cmdValidateSummary,  // Bug-10
+  'generate-summary-template': cmdGenerateSummaryTemplate,  // P3-4
   'compare-plan-hash': cmdComparePlanHash,  // Bug-09 / P2-17
   lock: () => { process.stdout.write(JSON.stringify(acquireLock())); },
   unlock: cmdUnlock,

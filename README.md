@@ -118,17 +118,17 @@ node _proc-use/reports/atdo.test.js
 
 | 项目 | 数量 |
 |------|------|
-| 测试套件 | 60 |
-| 测试用例 | 266 |
+| 测试套件 | 63 |
+| 测试用例 | 282 |
 | 通过率 | 100% |
 
-覆盖:init / get / set-phase / get-current-phase / inc-strike / get-strikes / record-commit / record-confirm / has-confirm / validate-summary / compare-plan-hash / lock / unlock / check-disk / check-lock-age / sanitize / heartbeat / summary / backup rotation / E2E 完整流程 + 9 个安全注入回归(路径穿越、命令注入、LLM 幻觉、敏感文件检测、P2 6 项加固)+ v2.0.x P2/P3 微修复(parseDfOutput / writeState 备份 / watchdog 守护 / 模板字段 / inc-strike ALERT 触发)。
+覆盖:init / get / set-phase / get-current-phase / inc-strike / get-strikes / record-commit / record-confirm / has-confirm / validate-summary / generate-summary-template / compare-plan-hash / lock / unlock / check-disk / check-lock-age / sanitize / heartbeat / summary / backup rotation / E2E 完整流程 + P1-2(record-commit HEAD 解析)+ P1-4(verification phase type)+ 9 个安全注入回归(路径穿越、命令注入、LLM 幻觉、敏感文件检测、P2 6 项加固)+ v2.0.x P2/P3 微修复(parseDfOutput / writeState 备份 / watchdog 守护 / 模板字段 / inc-strike ALERT 触发)。
 
 ## 文件清单
 
 ```
-SKILL.md                                   # 主编排器(1513 行)
-scripts/phase-state.js                     # 18 个状态管理命令(1223 行,零依赖)
+SKILL.md                                   # 主编排器(1680 行)
+scripts/phase-state.js                     # 19 个状态管理命令(1355 行,零依赖)
 scripts/watchdog.sh                        # 孤儿进程清理 + 心跳检查
 references/templates/
 ├── audit-report-template.md               # 审计报告模板

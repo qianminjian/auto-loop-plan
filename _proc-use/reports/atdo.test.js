@@ -1233,7 +1233,7 @@ describe('SKILL.md 文档守卫', () => {
   });
 
   test('所有 4 个 agent spawn 块都引用 PROCESS_FILE_POLICY(≥4 个 INJECT)', () => {
-    const matches = skillContent.match(/<<INJECT: copy the verbatim PROCESS_FILE_POLICY/g);
+    const matches = skillContent.match(/<<INJECT: PROCESS_FILE_POLICY>>/g);
     assert.ok(matches && matches.length >= 4,
       `应有 ≥4 个 INJECT marker,实际 ${matches ? matches.length : 0}`);
   });
@@ -3449,6 +3449,240 @@ describe('v2.0.x P2/P3 微修复', () => {
           'writeState 后磁盘 state.json 不应含 networkStatus');
         assert.ok(!('exitReason' in onDiskState),
           'writeState 后磁盘 state.json 不应含 exitReason');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+  });
+
+  // ─── P1-2: record-commit 接受 HEAD 字面量 ─────────────────
+  describe('P1-2: record-commit 支持 HEAD 解析', () => {
+    test('单 HEAD → git rev-parse 解析后写入', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p1-2-'));
+      try {
+        // record-commit HEAD 需要 git 仓库(解析 HEAD)
+        spawnSync('git', ['init'], { cwd: d });
+        spawnSync('git', ['config', 'user.email', 'test@test'], { cwd: d });
+        spawnSync('git', ['config', 'user.name', 'test'], { cwd: d });
+        // 至少一个 commit 才能 rev-parse HEAD
+        fs.writeFileSync(path.join(d, 'test.txt'), 'hello');
+        spawnSync('git', ['add', 'test.txt'], { cwd: d });
+        spawnSync('git', ['commit', '-m', 'init'], { cwd: d });
+        initPlan(d, JSON.stringify({ phases: [{ name: 'a', tasks: ['t1'] }] }));
+        const r = runIn(d, 'record-commit', '01', 'HEAD');
+        assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+        const out = JSON.parse(r.stdout);
+        assert.ok(out.ok);
+        assert.equal(out.count, 1);
+        assert.match(out.commits[0], /^[a-f0-9]{40}$/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('HEAD 与其他 hash 混合 → HEAD 解析,其他不变', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p1-2-'));
+      try {
+        spawnSync('git', ['init'], { cwd: d });
+        spawnSync('git', ['config', 'user.email', 'test@test'], { cwd: d });
+        spawnSync('git', ['config', 'user.name', 'test'], { cwd: d });
+        fs.writeFileSync(path.join(d, 'test.txt'), 'hello');
+        spawnSync('git', ['add', 'test.txt'], { cwd: d });
+        spawnSync('git', ['commit', '-m', 'init'], { cwd: d });
+        initPlan(d, JSON.stringify({ phases: [{ name: 'a', tasks: ['t1'] }] }));
+        const r = runIn(d, 'record-commit', '01', 'HEAD,abc1234,def5678');
+        assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+        const out = JSON.parse(r.stdout);
+        assert.ok(out.ok);
+        assert.equal(out.count, 3);
+        assert.match(out.commits[0], /^[a-f0-9]{40}$/);
+        assert.equal(out.commits[1], 'abc1234');
+        assert.equal(out.commits[2], 'def5678');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('HEAD 大小写不敏感(head/Head/HEAD 均接受)', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p1-2-'));
+      try {
+        spawnSync('git', ['init'], { cwd: d });
+        spawnSync('git', ['config', 'user.email', 'test@test'], { cwd: d });
+        spawnSync('git', ['config', 'user.name', 'test'], { cwd: d });
+        fs.writeFileSync(path.join(d, 'test.txt'), 'hello');
+        spawnSync('git', ['add', 'test.txt'], { cwd: d });
+        spawnSync('git', ['commit', '-m', 'init'], { cwd: d });
+        initPlan(d, JSON.stringify({ phases: [{ name: 'a', tasks: ['t1'] }] }));
+        for (const variant of ['HEAD', 'head', 'Head']) {
+          const r = runIn(d, 'record-commit', '01', variant);
+          assert.equal(r.code, 0, `variant "${variant}" 应成功, stderr: ${r.stderr}`);
+          const out = JSON.parse(r.stdout);
+          assert.match(out.commits[0], /^[a-f0-9]{40}$/, `variant "${variant}" 应解析为完整 hash`);
+        }
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('非 git 仓库中 HEAD → FATAL(无法解析)', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p1-2-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ name: 'a', tasks: ['t1'] }] }));
+        const r = runIn(d, 'record-commit', '01', 'HEAD');
+        assert.notEqual(r.code, 0);
+        assert.match(r.stderr, /无法解析 HEAD/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+  });
+
+  // ─── P1-4: verification phase type ─────────────────
+  describe('P1-4: verification phase type(verified 状态 + 快速路径)', () => {
+    test('init 接受 phase_type: verification', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p1-4-'));
+      try {
+        const plan = JSON.stringify({
+          phases: [
+            { name: 'Phase 01', tasks: ['task a'], phase_type: 'implementation' },
+            { name: '完备性检查', tasks: ['验证产出', '检查完整性'], phase_type: 'verification' },
+          ],
+        });
+        const r = initPlan(d, plan);
+        assert.equal(r.code, 0);
+        const out = JSON.parse(r.stdout);
+        assert.ok(out.ok);
+        assert.equal(out.phases, 2);
+        const state = JSON.parse(fs.readFileSync(path.join(d, '.phase-execution', 'state.json'), 'utf8'));
+        assert.equal(state.phases[0].phaseType, 'implementation');
+        assert.equal(state.phases[1].phaseType, 'verification');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('phaseType 缺省 → implementation(向后兼容)', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p1-4-'));
+      try {
+        const plan = JSON.stringify({ phases: [{ name: 'Phase 01', tasks: ['task a'] }] });
+        const r = initPlan(d, plan);
+        assert.equal(r.code, 0);
+        const state = JSON.parse(fs.readFileSync(path.join(d, '.phase-execution', 'state.json'), 'utf8'));
+        assert.equal(state.phases[0].phaseType, 'implementation');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('set-phase executed → verified(合法,verification path)', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p1-4-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ name: 'a', tasks: ['t1'], phase_type: 'verification' }] }));
+        runIn(d, 'set-phase', '01', 'in_progress');
+        runIn(d, 'set-phase', '01', 'executed');
+        const r = runIn(d, 'set-phase', '01', 'verified');
+        assert.equal(r.code, 0, `executed → verified 应合法, stderr: ${r.stderr}`);
+        const out = JSON.parse(r.stdout);
+        assert.ok(out.ok);
+        assert.equal(out.status, 'verified');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('set-phase verified → gated(合法)', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p1-4-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ name: 'a', tasks: ['t1'], phase_type: 'verification' }] }));
+        runIn(d, 'set-phase', '01', 'in_progress');
+        runIn(d, 'set-phase', '01', 'executed');
+        runIn(d, 'set-phase', '01', 'verified');
+        const r = runIn(d, 'set-phase', '01', 'gated');
+        assert.equal(r.code, 0, `verified → gated 应合法, stderr: ${r.stderr}`);
+        const out = JSON.parse(r.stdout);
+        assert.ok(out.ok);
+        assert.equal(out.status, 'gated');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('set-phase executed → gated(跳过 verified) → FATAL', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p1-4-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ name: 'a', tasks: ['t1'] }] }));
+        runIn(d, 'set-phase', '01', 'in_progress');
+        runIn(d, 'set-phase', '01', 'executed');
+        const r = runIn(d, 'set-phase', '01', 'gated');
+        assert.notEqual(r.code, 0);
+        assert.match(r.stderr, /非法转换/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('set-phase pending → verified(跳过所有中间态) → FATAL', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p1-4-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ name: 'a', tasks: ['t1'] }] }));
+        const r = runIn(d, 'set-phase', '01', 'verified');
+        assert.notEqual(r.code, 0);
+        assert.match(r.stderr, /非法转换/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('implementation phase 仍可走 executed → audited(标准路径不受影响)', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p1-4-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ name: 'a', tasks: ['t1'] }] }));
+        runIn(d, 'set-phase', '01', 'in_progress');
+        runIn(d, 'set-phase', '01', 'executed');
+        const r = runIn(d, 'set-phase', '01', 'audited');
+        assert.equal(r.code, 0, `executed → audited 应合法(标准路径), stderr: ${r.stderr}`);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('verification phase 完整路径: executed → verified → gated → completed', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p1-4-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ name: 'a', tasks: ['t1'], phase_type: 'verification' }] }));
+        runIn(d, 'set-phase', '01', 'in_progress');
+        runIn(d, 'set-phase', '01', 'executed');
+        runIn(d, 'set-phase', '01', 'verified');
+        runIn(d, 'set-phase', '01', 'gated');
+        const r = runIn(d, 'set-phase', '01', 'completed');
+        assert.equal(r.code, 0);
+        const state = JSON.parse(fs.readFileSync(path.join(d, '.phase-execution', 'state.json'), 'utf8'));
+        assert.equal(state.phases[0].status, 'completed');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+  });
+
+  // ─── P3-4: generate-summary-template ─────────────────
+  describe('P3-4: generate-summary-template 命令', () => {
+    test('输出模板含关键字段(决策/文件/Commit/Gate/遗留)', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p3-4-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ name: 'a', tasks: ['t1'] }] }));
+        const r = runIn(d, 'generate-summary-template', '01');
+        assert.equal(r.code, 0);
+        assert.match(r.stdout, /决策:/);
+        assert.match(r.stdout, /文件:/);
+        assert.match(r.stdout, /Commit:/);
+        assert.match(r.stdout, /Gate:/);
+        assert.match(r.stdout, /遗留:/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('gate phase 模板显示关口通过', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p3-4-'));
+      try {
+        const plan = JSON.stringify({ phases: [{ name: 'Gate', tasks: ['test'], is_gate: true }] });
+        initPlan(d, plan);
+        const r = runIn(d, 'generate-summary-template', '01');
+        assert.match(r.stdout, /关口通过/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('不存在 phaseId → FATAL', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p3-4-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ name: 'a', tasks: ['t1'] }] }));
+        const r = runIn(d, 'generate-summary-template', '99');
+        assert.notEqual(r.code, 0);
+        assert.match(r.stderr, /不存在/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('缺少 phaseId → FATAL', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p3-4-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ name: 'a', tasks: ['t1'] }] }));
+        const res = spawnSync('node', [SCRIPT, 'generate-summary-template'], {
+          encoding: 'utf8', cwd: d, env: { ...process.env, FORCE_COLOR: '0' },
+        });
+        assert.notEqual(res.status, 0);
+        assert.match(res.stderr, /需要 phaseId/);
       } finally { fs.rmSync(d, { recursive: true, force: true }); }
     });
   });
