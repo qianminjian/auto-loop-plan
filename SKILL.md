@@ -104,6 +104,14 @@ License、IDE 配置。CI 配置统一放 .github/。
 
 ### 2. 位置约束
 
+> **atdo runtime vs 长期归档边界(P2-3 明确)**:
+> - **atdo runtime 临时 / transient 产物**(运行时中间状态,可被清理)→ `.phase-execution/...`
+>   - 例:`.phase-execution/phases/01/audit-report.md` / `.phase-execution/gates/gate-2-integration/integration-test-report.md`
+>   - 审计模板/集成测试报告模板等"运行时需要复现"的文件,放这里(gitignored)
+> - **长期归档产物**(需 git 保留 / 跨会话追溯)→ `_proc-use/<phaseId>/` 或 `_proc-use/gates/<label>/`
+>   - 例:`_proc-use/01/01-execute-1.log`、`_proc-use/02/02-audit-1.md`
+>   - Bug-11 本节规定的"阶段产物 / 关卡产物"专指此类长期归档
+
 - **阶段产物**:`_proc-use/<phaseId>/` 下
   - 例:`_proc-use/01/01-execute-1.log`、`_proc-use/02/02-audit-1.md`
 - **关卡产物**:`_proc-use/gates/<label>/` 下
