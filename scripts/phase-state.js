@@ -146,6 +146,24 @@ function readState() {
   if (!state) {
     die('状态文件损坏且无备份，无法恢复。请检查 .phase-execution/ 目录。');
   }
+  // P3-5: 一次性剥离老 state.json 残留字段
+  //   - networkStatus:未实现 set-network-status 命令(P2-7 删除)
+  //   - exitReason   :未实现 set-exit-reason 命令(P2-7 删除)
+  // 老用户从 v1.x 升级到 v2.0.x 时,state.json 可能仍含这些字段
+  // init 不会主动写(向后兼容旧数据),但每次 readState 时剥离
+  // 命令输出(get / summary 等)不应再泄漏这些字段
+  // 副作用:readState 返回的对象被 in-place 修改,readState 调用方不会感知差异
+  let stripped = 0;
+  for (const staleField of ['networkStatus', 'exitReason']) {
+    if (Object.prototype.hasOwnProperty.call(state, staleField)) {
+      delete state[staleField];
+      stripped++;
+    }
+  }
+  if (stripped > 0) {
+    // 用 stderr 提示(不静默剥离),让 orchestrator 知道发生了兼容清理
+    process.stderr.write(`[INFO] readState 剥离 ${stripped} 个已删除字段(${['networkStatus', 'exitReason'].filter(f => true).join('/')}),建议下次写盘时持久化清理\n`);
+  }
   return state;
 }
 

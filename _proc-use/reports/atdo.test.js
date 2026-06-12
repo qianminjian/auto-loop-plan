@@ -3336,4 +3336,120 @@ describe('v2.0.x P2/P3 微修复', () => {
         '_proc-use/docs/DESIGN.md 应存在');
     });
   });
+
+  describe('P3-5: readState 剥离老 state.json 残留字段', () => {
+    // P3-5: v1.x → v2.0.x 升级时,老 state.json 可能仍含已删除字段
+    //   - networkStatus:未实现 set-network-status 命令(P2-7 删除)
+    //   - exitReason   :未实现 set-exit-reason 命令(P2-7 删除)
+    // 修复:readState() 在每次读盘后剥离这些字段,in-place 修改返回对象
+    //   - 不主动 writeState(避免副作用)
+    //   - 第一次剥离时 stderr INFO 提示(不静默)
+    // 测试:
+    //   1) 手工写入含 networkStatus/exitReason 的 state.json
+    //   2) 调 get 命令,验证输出不含这些字段
+    //   3) 验证 stderr 含 INFO 提示
+
+    test('老 state.json 含 networkStatus → get 命令输出不含该字段', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p3-5-'));
+      try {
+        const sd = path.join(d, '.phase-execution');
+        fs.mkdirSync(sd, { recursive: true });
+        // 手工写老版本 state.json
+        const oldState = {
+          version: '1.5',  // 假装是 v1.x 老数据
+          projectRoot: d,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          phases: [{ number: '01', name: 'phase-a', status: 'pending' }],
+          currentPhaseIndex: 0,
+          strikes: { phaseRetry: {}, regression: 0, sameCategory: {} },
+          securityEvents: [],
+          networkStatus: 'offline',  // ← 已删除字段
+          exitReason: 'manual-abort',  // ← 已删除字段
+        };
+        fs.writeFileSync(path.join(sd, 'state.json'), JSON.stringify(oldState), 'utf8');
+        // 调 get 命令输出全 state
+        const r = runIn(d, 'get');
+        assert.equal(r.code, 0, 'get 命令应正常执行');
+        assert.ok(!r.stdout.includes('networkStatus'),
+          `get 输出不应含 networkStatus 字段,实际: ${r.stdout.substring(0, 500)}`);
+        assert.ok(!r.stdout.includes('exitReason'),
+          `get 输出不应含 exitReason 字段,实际: ${r.stdout.substring(0, 500)}`);
+        // stderr 应有 INFO 提示
+        assert.match(r.stderr, /剥离.*已删除字段/,
+          `stderr 应含剥离提示,实际: ${r.stderr}`);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('get 网络状态键 → 老 networkStatus 字段应返回 undefined', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p3-5-'));
+      try {
+        const sd = path.join(d, '.phase-execution');
+        fs.mkdirSync(sd, { recursive: true });
+        fs.writeFileSync(path.join(sd, 'state.json'), JSON.stringify({
+          version: '1.5',
+          projectRoot: d,
+          phases: [],
+          currentPhaseIndex: 0,
+          strikes: { phaseRetry: {}, regression: 0, sameCategory: {} },
+          securityEvents: [],
+          networkStatus: 'offline',
+          exitReason: 'old',
+        }), 'utf8');
+        // 点路径访问 networkStatus
+        const r = runIn(d, 'get', 'networkStatus');
+        // 输出应是 null(字段被剥离)或空,但不应是 'offline'
+        assert.ok(r.stdout !== 'offline',
+          `get networkStatus 不应返回 'offline',实际: ${r.stdout}`);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('新版本 state.json(无残留字段)get 命令无 INFO 提示', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p3-5-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ id: 'P0-1' }] }));
+        // 新 init 不会写 networkStatus/exitReason
+        const r = runIn(d, 'get');
+        assert.equal(r.code, 0);
+        assert.ok(!r.stderr.includes('剥离'),
+          `新 state.json get 不应有 INFO 提示,实际: ${r.stderr}`);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('剥离是 in-place:同一 state 对象引用,后续 set-phase 写入不再带残留字段', () => {
+      // 验证 in-place 修改的副作用:set-phase 触发 writeState 时,
+      // 剥离后的 state 被序列化到磁盘,下次读盘不应该再触发剥离 INFO
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p3-5-'));
+      try {
+        const sd = path.join(d, '.phase-execution');
+        fs.mkdirSync(sd, { recursive: true });
+        fs.writeFileSync(path.join(sd, 'state.json'), JSON.stringify({
+          version: '1.5',
+          projectRoot: d,
+          phases: [{ number: '01', name: 'phase-a', status: 'pending' }],
+          currentPhaseIndex: 0,
+          strikes: { phaseRetry: {}, regression: 0, sameCategory: {} },
+          securityEvents: [],
+          networkStatus: 'offline',
+          exitReason: 'old',
+        }), 'utf8');
+        // 第一次读 → 应有 INFO 提示
+        const r1 = runIn(d, 'get');
+        assert.match(r1.stderr, /剥离/, '第一次读应有 INFO 提示');
+        // 但 readState 不会写盘,所以磁盘 state.json 仍含残留字段
+        // 验证:再次 get 仍应有 INFO
+        const r2 = runIn(d, 'get');
+        assert.match(r2.stderr, /剥离/, 'readState 不写盘,残留字段仍在,再次读仍触发 INFO');
+        // set-phase 触发 writeState → 写入剥离后的 state
+        const r3 = runIn(d, 'set-phase', '01', 'in_progress');
+        assert.equal(r3.code, 0);
+        // 现在磁盘 state.json 已被清理
+        const onDiskState = JSON.parse(fs.readFileSync(path.join(sd, 'state.json'), 'utf8'));
+        assert.ok(!('networkStatus' in onDiskState),
+          'writeState 后磁盘 state.json 不应含 networkStatus');
+        assert.ok(!('exitReason' in onDiskState),
+          'writeState 后磁盘 state.json 不应含 exitReason');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+  });
 });
