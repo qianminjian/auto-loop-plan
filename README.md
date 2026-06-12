@@ -43,6 +43,8 @@ AUTO_PHASE_NO_CONFIRM=true /atdo plan.md   # 完全无人值守(跳过所有检�
   4. Agent 审计        gsd-code-reviewer → 写入 audit-report.md
   5. 修复循环          最多 3 次(gsd-code-fixer)
   6. 关口检测          is_gate / depends_on / 每 2 阶段 / 最后一阶段
+ 6a. Manual gate     若 gateType=manual/hybrid → phase.status=awaiting_user_review
+                     orchestrator 不调 CronCreate,等用户答复(Bug-06 协议)
   7. Gate 集成测试     gsd-integration-checker + lint + jest --findRelatedTests
   8. Git commit        仅关口通过时,精确 add + 提交 + 记录 hash
   9. 状态持久化        atomic write + backup + CronCreate (durable, 跨会话续)
