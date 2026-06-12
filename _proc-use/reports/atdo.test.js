@@ -3153,4 +3153,49 @@ describe('v2.0.x P2/P3 微修复', () => {
       } finally { fs.rmSync(d, { recursive: true, force: true }); }
     });
   });
+
+  describe('P3-2: 模板字段对齐 SKILL.md 协议', () => {
+    // P3-2: 模板与 SKILL.md 协议脱节
+    //   - audit-report-template.md 缺 methodology / isManualGate / awaitingUserReviewStatus
+    //   - integration-test-report-template.md 缺 methodology / isManualGate / manualGateProtocol
+    //   - SKILL.md L646/L710 强制 [AUTO-EXEC-RESULT] marker 含 methodology=proxy|real|mixed
+    //   - Bug-06 新增 awaiting_user_review 顶层字段需在模板里体现
+    // 修复:在两模板元信息块加字段,保持原有结构,只补充
+    // 测试:直接 readFileSync 模板,grep 关键字段
+
+    test('audit-report-template.md 含 methodology / isManualGate / awaitingUserReviewStatus', () => {
+      const tplPath = path.join(__dirname, '..', '..', 'references', 'templates', 'audit-report-template.md');
+      const content = fs.readFileSync(tplPath, 'utf8');
+      assert.match(content, /methodology.*proxy\|real\|mixed/,
+        '审计模板应有 methodology 字段(proxy|real|mixed)');
+      assert.match(content, /isManualGate/,
+        '审计模板应有 isManualGate 字段');
+      assert.match(content, /awaitingUserReviewStatus/,
+        '审计模板应有 awaitingUserReviewStatus 字段(Bug-06 manual gate 协议)');
+    });
+
+    test('integration-test-report-template.md 含 methodology / isManualGate / manualGateProtocol', () => {
+      const tplPath = path.join(__dirname, '..', '..', 'references', 'templates', 'integration-test-report-template.md');
+      const content = fs.readFileSync(tplPath, 'utf8');
+      assert.match(content, /methodology.*proxy\|real\|mixed/,
+        '集成测试模板应有 methodology 字段(SKILL.md L710 协议)');
+      assert.match(content, /isManualGate/,
+        '集成测试模板应有 isManualGate 字段');
+      assert.match(content, /manualGateProtocol/,
+        '集成测试模板应有 manualGateProtocol 字段(Bug-06)');
+    });
+
+    test('两模板保留原有骨架(向后兼容,只补充不破坏)', () => {
+      const audit = fs.readFileSync(
+        path.join(__dirname, '..', '..', 'references', 'templates', 'audit-report-template.md'), 'utf8');
+      const integration = fs.readFileSync(
+        path.join(__dirname, '..', '..', 'references', 'templates', 'integration-test-report-template.md'), 'utf8');
+      // 原有章节标题必须保留
+      assert.match(audit, /## 审计摘要/);
+      assert.match(audit, /## 发现的问题/);
+      assert.match(audit, /## 审计结论/);
+      assert.match(integration, /## 测试摘要/);
+      assert.match(integration, /## 关口结论/);
+    });
+  });
 });

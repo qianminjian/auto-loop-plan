@@ -7,6 +7,9 @@
 **审计时间**: {{auditTimestamp}}
 **审计 Agent**: gsd-code-reviewer
 **状态**: {{auditStatus}}
+**审计方法学**: {{methodology}} (proxy|real|mixed — Bug-05 强制字段,orchestrator 据此判定 gate 是否需人工放行)
+**是否为 manual gate 阶段**: {{isManualGate}} (true|false)
+**当前 awaiting_user_review 状态**: {{awaitingUserReviewStatus}} (none|pending|pass|fail;pending 表示用户尚未答复)
 
 ---
 

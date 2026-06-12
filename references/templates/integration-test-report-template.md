@@ -8,6 +8,9 @@
 **覆盖阶段**: {{phaseRange}}
 **测试 Agent**: gsd-integration-checker
 **状态**: {{testStatus}}
+**测试方法学**: {{methodology}} (proxy|real|mixed — Bug-05 强制字段,SKILL.md L710 协议;orchestrator 据此判定 gate 是否需人工放行;proxy 报告不构成 gate 通过的充分证据)
+**是否为 manual gate 阶段**: {{isManualGate}} (true|false)
+**manual gate 协议状态**: {{manualGateProtocol}} (n/a|awaiting_user_review|user-review-pass|user-review-fail;Bug-06 新增)
 
 ---
 
