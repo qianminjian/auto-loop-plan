@@ -90,7 +90,7 @@ License、IDE 配置。CI 配置统一放 .github/。
 
 - `phaseId`:2 位数字字符串(`00` / `01` / `02` / ... / `10`)
   - 关卡(gate)产物用 `gate-N-<label>` 形式,如 `gate-2-integration`
-- `stepName`:白名单,严格从以下取一:
+- `stepName`:白名单,文档级软约束(扫描后 WARN,不阻断 commit)从以下取一:
   - `execute` — 阶段执行
   - `audit` — 阶段审计
   - `fix` — bug 修复
