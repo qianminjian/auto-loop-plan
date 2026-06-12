@@ -956,7 +956,7 @@ completed            → (终态)
 - orchestrator 据此判断:"当前 phase 已在 manual gate 中,等用户答复"——不调 CronCreate
 - 心跳 status 保持 `active`(不是 `paused`),让 watchdog 知道进程还活着
 
-**9. 完整状态机总览**(B1 修复后,可作为附录)
+**8.5 完整状态机总览**(B1 修复后,可作为附录)
 
 ```
 [pending]
