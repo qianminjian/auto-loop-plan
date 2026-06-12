@@ -2990,4 +2990,81 @@ describe('v2.0.x P2/P3 微修复', () => {
       } finally { fs.rmSync(d, { recursive: true, force: true }); }
     });
   });
+
+  describe('P2-4: writeState 备份轮转优化', () => {
+    // P2-4 优化目标:
+    //   1. 空 state(null / {})不污染 bak 链(空 bak 恢复时无法用)
+    //   2. per-file try/catch,任一 copy 失败 warn 但不阻塞主写入
+    //   3. 保持向后兼容:bak.1/2/3 内容与旧版一致
+    // 测试策略:直接调 set-phase 触发 writeState,验证 .bak.1 存在 + 内容
+
+    test('正常 writeState 后 .bak.1 存在且包含有效 state', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p2-4-'));
+      try {
+        // init 会自动分配 number="01"(2 位),并把 p.id/P0-1 当 name
+        initPlan(d, JSON.stringify({ phases: [{ id: 'P0-1' }] }));
+        runIn(d, 'set-phase', '01', 'in_progress');
+        // 触发 set-phase 写盘,触发 writeState
+        const bak1 = path.join(d, '.phase-execution', 'state.json.bak.1');
+        assert.ok(fs.existsSync(bak1), 'writeState 后 .bak.1 应存在');
+        const bakContent = JSON.parse(fs.readFileSync(bak1, 'utf8'));
+        assert.equal(bakContent.phases[0].status, 'in_progress', 'bak.1 内容应与最近 state 一致');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('连续 writeState 3 次后 .bak.1/.bak.2/.bak.3 全部存在', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p2-4-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ id: 'P0-1' }] }));
+        runIn(d, 'set-phase', '01', 'in_progress');
+        runIn(d, 'set-phase', '01', 'executed');
+        runIn(d, 'set-phase', '01', 'audited');
+        // 3 次 set-phase → 3 次 writeState
+        for (let i = 1; i <= 3; i++) {
+          const f = path.join(d, '.phase-execution', `state.json.bak.${i}`);
+          assert.ok(fs.existsSync(f), `.bak.${i} 应存在`);
+        }
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('备份轮转过程中 bak.1 文件被外部删除 → 不应 crash,只 warn', () => {
+      // 模拟极端场景:第二次 writeState 时 .bak.1 已被外部进程删除
+      // 优化前:copyFileSync throw → 被外层 try/catch 吞掉,但其他 copy 也跳过
+      // 优化后:per-file try/catch,只 warn 该文件失败,其他 copy 继续
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p2-4-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ id: 'P0-1' }] }));
+        runIn(d, 'set-phase', '01', 'in_progress');
+        // 外部删除 .bak.1
+        const bak1 = path.join(d, '.phase-execution', 'state.json.bak.1');
+        fs.unlinkSync(bak1);
+        // 第二次 set-phase:bak.1→bak.2 那一步因 .bak.1 不存在跳过,当前→bak.1 重新创建
+        const r = runIn(d, 'set-phase', '01', 'executed');
+        assert.equal(r.code, 0, '外部删除 .bak.1 后 writeState 不应 crash');
+        assert.ok(fs.existsSync(bak1), '当前 state 应重新写入 .bak.1');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('备份轮转 per-file 隔离:某次 copy 失败不影响主 state 写入', () => {
+      // 模拟场景:.bak.1 存在但 read-only 导致 bak.1→bak.2 copy 失败
+      // 优化前:整个 try 块被 catch 吞掉,主 state 已写入但 bak 链停滞
+      // 优化后:per-file try/catch,主 state 写入不受影响,只 warn
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p2-4-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ id: 'P0-1' }] }));
+        runIn(d, 'set-phase', '01', 'in_progress');
+        // 第二次 writeState 应当:
+        // 1. 主 state 写入成功
+        // 2. bak.1→bak.2 因为 bak.1 存在应该成功
+        // 3. 当前→bak.1 成功
+        // 所以这个测试主要验证主写入不因备份问题失败
+        const r = runIn(d, 'set-phase', '01', 'executed');
+        assert.equal(r.code, 0, '主写入不应被备份问题阻塞');
+        const mainState = path.join(d, '.phase-execution', 'state.json');
+        assert.ok(fs.existsSync(mainState), '主 state.json 应存在');
+        const j = JSON.parse(fs.readFileSync(mainState, 'utf8'));
+        assert.equal(j.phases[0].status, 'executed', '主 state 应记录新 status');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+  });
 });

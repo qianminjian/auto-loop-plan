@@ -153,13 +153,26 @@ function writeState(state) {
   atomicWrite(STATE_FILE, state);
   // 多版本轮转:bak.3 → 丢弃,bak.2 → bak.3,bak.1 → bak.2,当前 → bak.1
   // 这样保留最近 3 个历史版本,损坏时可按序回退
-  try {
-    if (fs.existsSync(BACKUP_FILES[1])) fs.copyFileSync(BACKUP_FILES[1], BACKUP_FILES[2]);
-    if (fs.existsSync(BACKUP_FILES[0])) fs.copyFileSync(BACKUP_FILES[0], BACKUP_FILES[1]);
-    fs.copyFileSync(STATE_FILE, BACKUP_FILES[0]);
-  } catch {
-    // 备份失败不阻塞主流程
+  // P2-4 优化:
+  //   - 跳过空 state 备份(空 state 污染 bak 链,恢复时无法用)
+  //   - per-file try/catch,任一 copy 失败 warn 但不阻塞主写入
+  //   - 仍保持向后兼容:bak.1/2/3 内容与旧版一致
+  if (!state || (typeof state === 'object' && Object.keys(state).length === 0)) {
+    return; // 空 state 不备份
   }
+  // bak.2 → bak.3
+  if (fs.existsSync(BACKUP_FILES[1])) {
+    try { fs.copyFileSync(BACKUP_FILES[1], BACKUP_FILES[2]); }
+    catch (e) { process.stderr.write(`[WARN] 备份轮转 ${path.basename(BACKUP_FILES[1])}→${path.basename(BACKUP_FILES[2])} 失败: ${e.message}\n`); }
+  }
+  // bak.1 → bak.2
+  if (fs.existsSync(BACKUP_FILES[0])) {
+    try { fs.copyFileSync(BACKUP_FILES[0], BACKUP_FILES[1]); }
+    catch (e) { process.stderr.write(`[WARN] 备份轮转 ${path.basename(BACKUP_FILES[0])}→${path.basename(BACKUP_FILES[1])} 失败: ${e.message}\n`); }
+  }
+  // 当前 → bak.1
+  try { fs.copyFileSync(STATE_FILE, BACKUP_FILES[0]); }
+  catch (e) { process.stderr.write(`[WARN] 备份当前 state→${path.basename(BACKUP_FILES[0])} 失败: ${e.message}\n`); }
 }
 
 function die(msg) {
