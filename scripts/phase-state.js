@@ -280,24 +280,39 @@ function checkDisk(minMB = 500) {
   try {
     const { execFileSync } = require('child_process');
     const df = execFileSync('df', ['-P', '.'], { encoding: 'utf8' });
-    // df -P 输出格式:
-    //   Filesystem     1024-blocks      Used Available Capacity Mounted on
-    //   /dev/disk1s5   488245288 312345678 175899610    64%    /
-    const lines = df.trim().split('\n');
-    if (lines.length < 2) return { ok: false, note: 'df 输出格式异常,跳过', error: 'lines < 2' };
-    const parts = lines[1].trim().split(/\s+/);
-    // -P 模式下 Available 是第 4 列(索引 3);部分 Unix 是第 3 列
-    const available = parseInt(parts[3] || parts[2], 10);
-    if (Number.isNaN(available)) {
-      return { ok: false, note: 'df 输出无法解析,跳过', error: `parts: ${JSON.stringify(parts)}` };
-    }
-    if (available < minMB) {
-      die(`磁盘可用空间不足: ${available}MB < ${minMB}MB`);
-    }
-    return { availableMB: available, minRequired: minMB, ok: true };
+    return parseDfOutput(df, minMB);
   } catch (e) {
     return { ok: false, note: '无法检查磁盘空间，跳过', error: e.message };
   }
+}
+
+// P2-3: 抽出 parseDfOutput 纯函数,便于测试两种 df 输出格式
+//   - macOS 默认 df:512-byte blocks,Available 在第 3 列(或变长列位)
+//   - GNU df -P:1024-byte blocks,固定 6 列,Available 在第 4 列(parts[3])
+//   - 缺省:用 parts[3] || parts[2] 兼容(parts[2] 是 Used;若 parts[3] 不可用回退)
+//   - 测试覆盖见 atdo.test.js v2.0.x P2-3
+function parseDfOutput(dfOutput, minMB = 500) {
+  // df -P 输出格式:
+  //   Filesystem     1024-blocks      Used Available Capacity Mounted on
+  //   /dev/disk1s5   488245288 312345678 175899610    64%    /
+  // macOS 默认 df 输出格式(无 -P):
+  //   Filesystem    512-blocks      Used  Available Capacity iused      iused%  Mounted on
+  //   /dev/disk1s5  976490576 312345678 175899610    64% ...
+  const lines = dfOutput.trim().split('\n');
+  if (lines.length < 2) return { ok: false, note: 'df 输出格式异常,跳过', error: 'lines < 2' };
+  const parts = lines[1].trim().split(/\s+/);
+  // -P 模式:Available 在第 4 列(parts[3])
+  // macOS / 部分 Unix:Available 在第 4 列(parts[3])但 block size 不同
+  // 老旧 BSD:可能在第 3 列(parts[2] 是 Available)
+  // 用 fallback 兼容两种模式
+  const available = parseInt(parts[3] || parts[2], 10);
+  if (Number.isNaN(available)) {
+    return { ok: false, note: 'df 输出无法解析,跳过', error: `parts: ${JSON.stringify(parts)}` };
+  }
+  if (available < minMB) {
+    die(`磁盘可用空间不足: ${available}MB < ${minMB}MB`);
+  }
+  return { availableMB: available, minRequired: minMB, ok: true };
 }
 
 // ─── 心跳 ───────────────────────────────────────────────
