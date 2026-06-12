@@ -2360,6 +2360,28 @@ describe('Bug-10 summary.md 长度校验(≤500 chars)', () => {
       assert.match(r.stderr, /不是\s*合法\s*UTF-8/);
     });
 
+    // P3-21: UTF-8 校验漏判边缘 — 0xC0 0x80(过短起始字节) / 0xFF 0xFE(UTF-16 BOM 字节)
+    test('P3-21: 过短起始字节 0xC0 0x80 → exit 3(非 UTF-8)', () => {
+      // 0xC0 是过短起始字节(overlong encoding),Node 读 utf8 会替换为 U+FFFD
+      const summaryDir = path.join(dir, '.phase-execution/phases/02');
+      fs.mkdirSync(summaryDir, { recursive: true });
+      const buf = Buffer.from([0xC0, 0x80]);  // 过短 null byte
+      fs.writeFileSync(path.join(summaryDir, 'summary.md'), buf);
+      const r = runIn(dir, 'validate-summary', '02');
+      assert.equal(r.code, 3, `0xC0 0x80 应被识别为非 UTF-8,实际: ${r.code}, stderr: ${r.stderr}`);
+      assert.match(r.stderr, /不是\s*合法\s*UTF-8/);
+    });
+
+    test('P3-21: UTF-16 LE BOM 0xFF 0xFE → exit 3(非 UTF-8)', () => {
+      // UTF-16 LE BOM 当 UTF-8 读会生成 U+FFFD 替换字符
+      const summaryDir = path.join(dir, '.phase-execution/phases/02');
+      fs.mkdirSync(summaryDir, { recursive: true });
+      const buf = Buffer.from([0xFF, 0xFE, 0x68, 0x00]);  // UTF-16 LE BOM + "h"
+      fs.writeFileSync(path.join(summaryDir, 'summary.md'), buf);
+      const r = runIn(dir, 'validate-summary', '02');
+      assert.equal(r.code, 3, `UTF-16 LE BOM 应被识别为非 UTF-8,实际: ${r.code}, stderr: ${r.stderr}`);
+    });
+
     test('phaseId 不存在 → die(exit 1)带"阶段 X 不存在"消息', () => {
       // 防止 phaseId 拼写错误时读非预期路径
       const r = runIn(dir, 'validate-summary', '99');
