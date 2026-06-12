@@ -1861,6 +1861,33 @@ describe('Bug-07 Checkpoint 协议 Phase-scoped 幂等 token', () => {
         } finally { fs.rmSync(d, { recursive: true, force: true }); }
       }
     });
+
+    // P2-12: LIFO 语义 — has-confirm 取该 phase 的最后一条确认(用户最新决策优先)
+    test('P2-12: 多次 record-confirm 同一 phase → has-confirm 返最后一条(LIFO)', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-bug07-lifo-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        // 用户先 c 同意,后 a 终止 — 最新决策 a 应覆盖历史 c
+        runIn(d, 'record-confirm', '01', 'c');
+        runIn(d, 'record-confirm', '01', 'a');
+        const r = runIn(d, 'has-confirm', '01');
+        assert.equal(r.code, 0, '已确认应返回 0');
+        assert.match(r.stdout, /"decision":\s*"a"/,
+          'P2-12: LIFO 语义应取最后一条(a),不是第一条(c)');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('P2-12: 反向 — 先 a 后 c → has-confirm 返 c(LIFO 仍生效)', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-bug07-lifo-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        // 先 a 终止,后 c 同意(用户改主意) — 最新决策 c 应覆盖 a
+        runIn(d, 'record-confirm', '01', 'a');
+        runIn(d, 'record-confirm', '01', 'c');
+        const r = runIn(d, 'has-confirm', '01');
+        assert.match(r.stdout, /"decision":\s*"c"/, 'LIFO: 后 c 应覆盖先 a');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
   });
 });
 

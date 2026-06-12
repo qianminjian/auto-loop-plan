@@ -992,7 +992,12 @@ function cmdHasConfirm() {
   if (!phaseId) die('has-confirm 需要 phaseId 作为参数');
   // 向后兼容:旧 state.json 无 userConfirmations 字段时视为空数组
   const confirmations = Array.isArray(state.userConfirmations) ? state.userConfirmations : [];
-  const found = confirmations.find(c => c.phaseId === phaseId);
+  // P2-12: LIFO 语义 — 取该 phase 的最后一条确认(用户最新决策优先)
+  //   例:phase 01 先 c 同意,后 a 终止,has-confirm 应返 a(让 orchestrator 知道用户已终止)
+  //   旧实现 find() 取第一条,在"先 c 后 a"场景会返 c,orchestrator 误以为用户同意
+  //   LIFO 语义:用户最新决策代表"现在的意图",历史 c 仅作审计
+  const phaseConfirms = confirmations.filter(c => c.phaseId === phaseId);
+  const found = phaseConfirms.length > 0 ? phaseConfirms[phaseConfirms.length - 1] : null;
   if (found) {
     // 已确认(任意 decision:c / s / a 都算,避免 orchestrator 误以为要重新问)
     process.stdout.write(JSON.stringify({ confirmed: true, phaseId, decision: found.decision, decidedAt: found.decidedAt }));
