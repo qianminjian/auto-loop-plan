@@ -843,11 +843,36 @@ function cmdSanitize() {
   // 到这里文件必然存在(P2-F: 删掉冗余的二次 existsSync 检查)
   const content = fs.readFileSync(filepath, 'utf8');
   const sanitized = sanitize(content);
+  // P2-14: SKILL.md 协议 L1256 要求 sanitize 写 securityEvents 到 state.json
+  // 算法:数原文中 SECRET_PATTERNS 命中总数(replace 命中)
+  let secretsFound = 0;
   if (sanitized !== content) {
+    for (const pattern of SECRET_PATTERNS) {
+      // match 可能 null(无匹配);global flag 影响 matchAll 但不改变 match
+      const matches = content.match(pattern) || [];
+      secretsFound += matches.length;
+    }
     fs.writeFileSync(filepath, sanitized, 'utf8');
-    process.stdout.write(JSON.stringify({ sanitized: true, file: filepath }));
+    // 写 state.json.securityEvents — 容忍 state.json 不存在(无 state 时跳过,不让 sanitize 命令强制 init)
+    if (fs.existsSync(STATE_FILE)) {
+      try {
+        const state = readState();
+        if (!Array.isArray(state.securityEvents)) state.securityEvents = [];
+        state.securityEvents.push({
+          file: filepath,
+          at: new Date().toISOString(),
+          secretsFound,
+        });
+        state.updatedAt = new Date().toISOString();
+        writeState(state);
+      } catch (e) {
+        // securityEvents 写失败不应阻塞 sanitize 主流程(已成功脱敏 + 写文件)
+        process.stderr.write(`[WARN] sanitize 写 securityEvents 失败: ${e.message}\n`);
+      }
+    }
+    process.stdout.write(JSON.stringify({ sanitized: true, file: filepath, secretsFound, eventCount: fs.existsSync(STATE_FILE) ? readState().securityEvents.length : 0 }));
   } else {
-    process.stdout.write(JSON.stringify({ sanitized: false, file: filepath }));
+    process.stdout.write(JSON.stringify({ sanitized: false, file: filepath, secretsFound: 0 }));
   }
 }
 
