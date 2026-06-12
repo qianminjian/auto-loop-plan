@@ -1474,6 +1474,8 @@ node ~/.agents/skills/atdo/scripts/phase-state.js set-phase <id> <status> # Upda
 node ~/.agents/skills/atdo/scripts/phase-state.js inc-strike <id> <type>  # Increment strike
 node ~/.agents/skills/atdo/scripts/phase-state.js get-strikes [phaseId]  # Query strike counts
 node ~/.agents/skills/atdo/scripts/phase-state.js record-commit <id> <h[,h,...]>  # Record commit hash(es),comma-separated supported
+node ~/.agents/skills/atdo/scripts/phase-state.js record-confirm <phaseId> <c|s|a> # Record user confirmation (Bug-07)
+node ~/.agents/skills/atdo/scripts/phase-state.js has-confirm <phaseId>           # Check if phase confirmed (Bug-07, LIFO)
 node ~/.agents/skills/atdo/scripts/phase-state.js summary                 # State summary
 node ~/.agents/skills/atdo/scripts/phase-state.js validate-summary <phaseId>  # Validate summary.md length (Bug-10, ≤500 chars)
 
@@ -1481,8 +1483,12 @@ node ~/.agents/skills/atdo/scripts/phase-state.js validate-summary <phaseId>  # 
 node ~/.agents/skills/atdo/scripts/phase-state.js lock                                                      # 获取锁
 node ~/.agents/skills/atdo/scripts/phase-state.js unlock --reason=all-completed|aborted|alert            # 释放锁(Bug-08)
 node ~/.agents/skills/atdo/scripts/phase-state.js check-disk              # Disk space check
+node ~/.agents/skills/atdo/scripts/phase-state.js check-lock-age          # Check lock age & warn if > 24h (P3-24)
 node ~/.agents/skills/atdo/scripts/phase-state.js sanitize <file>         # Redact secrets
 node ~/.agents/skills/atdo/scripts/phase-state.js heartbeat <p> <t> <s>   # Write heartbeat
+
+# Plan integrity
+node ~/.agents/skills/atdo/scripts/phase-state.js compare-plan-hash <plan-file>  # Compare plan file md5 vs state.planHash (P2-17)
 
 # Watchdog
 bash ~/.agents/skills/atdo/scripts/watchdog.sh cleanup                    # Kill orphan agents
