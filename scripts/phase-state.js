@@ -701,6 +701,9 @@ function cmdGetCurrentPhase() {
     tasks: phase.tasks,
     isGate: phase.isGate,
     status: phase.status,
+    // P2-6: ACTIVE_STATUSES 真正投入使用 — 标记 phase 是否处于"活跃中间态"
+    // orchestrator 据此判断"phase 还在做事"还是"已完成/已失败",不再依赖 status 字符串
+    isActive: ACTIVE_STATUSES.includes(phase.status),
     totalPhases: state.phases.length,
     index: state.currentPhaseIndex,
   };
