@@ -312,6 +312,39 @@ describe('P1-2: get-current-phase awaiting_user_review 字段', () => {
     assert.doesNotMatch(r.stdout, /"awaitingUserReview"/);
     fs.rmSync(d2, { recursive: true, force: true });
   });
+
+  // P2-9: 多 phase 场景 — 02 处于 awaiting_user_review,get-current-phase 应返 02 + awaitingUserReview: true
+  test('P2-9: 多 phase 中间 02 在 awaiting_user_review,get-current-phase 返 02 + awaitingUserReview', () => {
+    const d3 = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-test-'));
+    initPlan(d3, JSON.stringify({ phases: [
+      { number: '01', name: 'a' },
+      { number: '02', name: 'b', isGate: true, gate: 'manual' },
+      { number: '03', name: 'c' },
+    ]}));
+    // 推进 01 到 completed(严格状态机:pending → in_progress → executed → audited → fixed → gated → completed)
+    runIn(d3, 'set-phase', '01', 'in_progress');
+    runIn(d3, 'set-phase', '01', 'executed');
+    runIn(d3, 'set-phase', '01', 'audited');
+    runIn(d3, 'set-phase', '01', 'fixed');
+    runIn(d3, 'set-phase', '01', 'gated');
+    runIn(d3, 'set-phase', '01', 'completed');
+    // 推进 02 到 awaiting_user_review(manual gate 路径)
+    runIn(d3, 'set-phase', '02', 'in_progress');
+    runIn(d3, 'set-phase', '02', 'executed');
+    runIn(d3, 'set-phase', '02', 'audited');
+    runIn(d3, 'set-phase', '02', 'fixed');
+    runIn(d3, 'set-phase', '02', 'gated');
+    runIn(d3, 'set-phase', '02', 'awaiting_user_review');
+    const r = runIn(d3, 'get-current-phase');
+    // 当前 phase 应是 02(含 gate manual + awaiting_user_review)
+    assert.match(r.stdout, /"number":\s*"02"/);
+    assert.match(r.stdout, /"status":\s*"awaiting_user_review"/);
+    assert.match(r.stdout, /"awaitingUserReview":\s*true/);
+    assert.match(r.stdout, /"gateType":\s*"manual"/);
+    // 03 不应在返回中(游标停在 02)
+    assert.doesNotMatch(r.stdout, /"number":\s*"03"/);
+    fs.rmSync(d3, { recursive: true, force: true });
+  });
 });
 
 describe('inc-strike 三维度 + 参数校验', () => {
