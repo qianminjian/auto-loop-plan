@@ -810,6 +810,40 @@ function cmdIncStrike() {
   state.updatedAt = new Date().toISOString();
   writeState(state);
   const maxed = maxedPhase || maxedRegression || maxedCategory;
+  // P3-3: 达到阈值时输出 ALERT 建议到 stderr
+  //   - 不直接写文件(由 orchestrator 决定是否落盘)
+  //   - 输出格式遵循 SKILL.md 协议(让 orchestrator 能 parse)
+  //   - 多维度同时触发时合并输出(避免重复)
+  if (maxed) {
+    const alerts = [];
+    if (maxedPhase) {
+      alerts.push(`- **phaseRetry 触发**: ${phaseId} 的 ${type} 已 ${count}/${STRIKE_THRESHOLDS.phaseRetry} 次,建议升级 manual gate 或暂停该 phase`);
+    }
+    if (maxedRegression) {
+      alerts.push(`- **regression 触发**: 全局 regression 已 ${count}/${STRIKE_THRESHOLDS.regression} 次,建议暂停回退所有未完成 phase 并重新审计`);
+    }
+    if (maxedCategory) {
+      alerts.push(`- **sameCategory 触发**: ${type} 类问题跨阶段累计 ${categoryCount}/${STRIKE_THRESHOLDS.sameCategory} 次,建议升级为系统性重构`);
+    }
+    const alertBlock = [
+      '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+      '⚠️  [atdo ALERT] 3-strike 触发 — 建议写入 ALERT.md',
+      '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+      `阶段: ${phaseId}`,
+      `类型: ${type}`,
+      `phaseRetry 计数: ${count}/${STRIKE_THRESHOLDS.phaseRetry} (maxed=${maxedPhase})`,
+      `regression 计数: ${state.strikes.regression || 0}/${STRIKE_THRESHOLDS.regression} (maxed=${maxedRegression})`,
+      `sameCategory 计数: ${categoryCount || 0}/${STRIKE_THRESHOLDS.sameCategory} (maxed=${maxedCategory})`,
+      '',
+      '建议行动:',
+      ...alerts,
+      '',
+      '提示: ALERT 内容由 orchestrator 决定是否写入 .phase-execution/ALERT.md;',
+      '      phase-state.js 不自动写文件(避免覆盖已有 ALERT 内容)。',
+      '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+    ].join('\n');
+    process.stderr.write(alertBlock + '\n');
+  }
   process.stdout.write(JSON.stringify({
     phaseId,
     type,

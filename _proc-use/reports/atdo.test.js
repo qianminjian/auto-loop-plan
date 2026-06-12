@@ -3198,4 +3198,105 @@ describe('v2.0.x P2/P3 微修复', () => {
       assert.match(integration, /## 关口结论/);
     });
   });
+
+  describe('P3-3: inc-strike 阈值触发 ALERT 建议到 stderr', () => {
+    // P3-3: 3-strike ALERT 触发在 phase-state.js 中无显式输出
+    //   现状:inc-strike 返回 action=ALERT_AND_EXIT 但 stderr 静默
+    //   修复:maxed 时输出 ALERT 建议到 stderr(不直接写文件)
+    // 阈值:phaseRetry=3 / regression=2 / sameCategory=5
+    // 测试:触发阈值 → stderr 含 ALERT 块 → 不写 ALERT.md 文件(留给 orchestrator)
+
+    test('phaseRetry 达到 3 → stderr 含 ALERT 块', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p3-3-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ id: 'P0-1' }] }));
+        // 调 3 次 inc-strike:第 3 次应触发 maxed
+        runIn(d, 'inc-strike', '01', 'execution');
+        runIn(d, 'inc-strike', '01', 'execution');
+        const r3 = runIn(d, 'inc-strike', '01', 'execution');
+        assert.equal(r3.code, 0, '第 3 次 inc-strike 应 exit 0');
+        assert.match(r3.stderr, /atdo ALERT.*3-strike 触发/s,
+          `stderr 应含 ALERT 块,实际: ${r3.stderr}`);
+        assert.match(r3.stderr, /phaseRetry 触发/,
+          'stderr 应标注 phaseRetry 触发');
+        // stdout JSON action=ALERT_AND_EXIT
+        const j = JSON.parse(r3.stdout);
+        assert.equal(j.action, 'ALERT_AND_EXIT');
+        assert.equal(j.maxedPhase, true);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('regression 达到 2 → stderr 含 regression 触发', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p3-3-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ id: 'P0-1' }] }));
+        runIn(d, 'inc-strike', '01', 'regression');
+        const r2 = runIn(d, 'inc-strike', '01', 'regression');
+        assert.equal(r2.code, 0, '第 2 次 regression 应 exit 0');
+        assert.match(r2.stderr, /regression 触发/,
+          'stderr 应标注 regression 触发');
+        assert.match(r2.stderr, /暂停回退所有未完成 phase/s,
+          'stderr 应给出 regression 建议行动');
+        const j = JSON.parse(r2.stdout);
+        assert.equal(j.maxedRegression, true);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('sameCategory 达到 5 → stderr 含 sameCategory 触发', () => {
+      // sameCategory 跨阶段累计:每个 phase 各调 1 次 + 另 1 个 phase 1 次 = 5 次
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p3-3-'));
+      try {
+        initPlan(d, JSON.stringify({
+          phases: [
+            { id: 'P0-1' },
+            { id: 'P0-2' },
+            { id: 'P0-3' },
+            { id: 'P0-4' },
+            { id: 'P0-5' },
+          ],
+        }));
+        // 5 个 phase 各调 1 次 execution,第 5 次触发 sameCategory=5
+        for (let i = 1; i <= 4; i++) {
+          const n = String(i).padStart(2, '0');
+          runIn(d, 'inc-strike', n, 'execution');
+        }
+        const r5 = runIn(d, 'inc-strike', '05', 'execution');
+        assert.equal(r5.code, 0);
+        assert.match(r5.stderr, /sameCategory 触发/,
+          'stderr 应标注 sameCategory 触发');
+        assert.match(r5.stderr, /系统性重构/,
+          'stderr 应给出 sameCategory 建议行动');
+        const j = JSON.parse(r5.stdout);
+        assert.equal(j.maxedCategory, true);
+        assert.equal(j.categoryCount, 5);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('未达阈值时 stderr 不含 ALERT 块', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p3-3-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ id: 'P0-1' }] }));
+        const r = runIn(d, 'inc-strike', '01', 'execution');
+        assert.equal(r.code, 0);
+        assert.ok(!r.stderr.includes('atdo ALERT'),
+          `未达阈值时 stderr 不应含 ALERT 块,实际: ${r.stderr}`);
+        const j = JSON.parse(r.stdout);
+        assert.equal(j.action, 'RETRY');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('ALERT 建议仅输出到 stderr,不写 ALERT.md 文件(由 orchestrator 决定)', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p3-3-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ id: 'P0-1' }] }));
+        runIn(d, 'inc-strike', '01', 'execution');
+        runIn(d, 'inc-strike', '01', 'execution');
+        runIn(d, 'inc-strike', '01', 'execution');
+        // phase-state.js 不应自动创建 ALERT.md
+        const alertFile = path.join(d, '.phase-execution', 'ALERT.md');
+        assert.ok(!fs.existsSync(alertFile),
+          'phase-state.js 不应自动写 ALERT.md 文件(由 orchestrator 决定)');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+  });
 });
