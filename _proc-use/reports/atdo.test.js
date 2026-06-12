@@ -2431,15 +2431,21 @@ describe('Bug-11 过程文件命名与位置规范', () => {
     );
   });
 
-  // 测试 2:SKILL.md 包含 "禁止带 timestamp 后缀" 或 "index 从 1 递增" 等明确说明
-  test('SKILL.md 包含"禁止带 timestamp"或"index 从 1 递增"明确说明', () => {
+  // 测试 2:SKILL.md 包含 "禁止带 timestamp" 和 "index 从 1 递增" 明确说明(收紧为"且")
+  // P2-18 收紧:旧实现"二选一"降低测试约束力,任何一关键词命中即 pass
+  // 新实现"两者都命中"才 pass,确保 Bug-11 协议完整覆盖命名规则
+  test('SKILL.md 同时包含"禁止带 timestamp"和"index 从 1 递增"明确说明', () => {
     const skillContent = fs.readFileSync(SKILL_PATH, 'utf8');
-    // 二选一:必须明确禁止 timestamp 后缀,或明确 index 从 1 递增
     const noTimestamp = /禁止带\s*timestamp|timestamp\s*后缀|带\s*timestamp|不能带\s*timestamp/i;
-    const indexFrom1 = /index\s*从\s*1\s*递增|index\s*为\s*1|index\s*为\s*`?1`?|从\s*`?1`?\s*开始/i;
+    // SKILL.md L102 实际措辞是 `index`:从 `1` 递增,反引号包裹 1
+    const indexFrom1 = /index.{0,8}从\s*`?1`?\s*递增|从\s*`?1`?\s*开始\s*递增|index\s*为\s*`?1`?|index\s*\(?从\s*1\s*递增/i;
     assert.ok(
-      noTimestamp.test(skillContent) || indexFrom1.test(skillContent),
-      '必须明确说明 "禁止带 timestamp 后缀" 或 "index 从 1 递增" 之一'
+      noTimestamp.test(skillContent),
+      'SKILL.md 必须明确说明"禁止带 timestamp 后缀"'
+    );
+    assert.ok(
+      indexFrom1.test(skillContent),
+      'SKILL.md 必须明确说明"index 从 1 递增"'
     );
   });
 
