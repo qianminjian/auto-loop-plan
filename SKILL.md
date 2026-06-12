@@ -154,7 +154,7 @@ License、IDE 配置。CI 配置统一放 .github/。
 | `--only N` | Execute only phase N |
 | `--resume` | Resume from `.phase-execution/state.json` |
 | `--dry-run` | Parse plan, show phases, don't execute |
-| `--no-audit` | Skip audit step (fast mode) |
+| `--no-audit` | Skip agent audit 报告生成(状态机仍走 `executed → audited` 自动完成,不 spawn gsd-code-reviewer) |
 | `--force-dirty` | Allow execution with dirty workspace (diff tracking may be unreliable) |
 | `AUTO_PHASE_NO_CONFIRM=true` | Skip all checkpoints (fully unattended) |
 
@@ -585,6 +585,8 @@ Any verification failure → trigger fix loop (step 5).
 Record findings to execution-log.md.
 
 **4. Agent Audit** (unless `--no-audit` flag is set)
+
+> **P1-4 协议明确**:`--no-audit` 仅跳过"agent audit 报告生成"(不 spawn gsd-code-reviewer),但状态机 **必须** 仍走 `executed → audited`(orchestrator 在该模式下直接 `set-phase ... audited`,不依赖 audit 报告)。这样 `--no-audit` 与 Bug-06 严格状态机无矛盾:状态机推进不停,只是少一个 agent spawn。
 
 Spawn gsd-code-reviewer agent:
 ```
