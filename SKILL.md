@@ -1100,7 +1100,7 @@ find .phase-execution/phases/<phaseId> -maxdepth 1 -name '*.log' -exec mv {} .ph
 ### 1. 硬约束
 
 - 每个 phase 的 `summary.md` 字符数 **≤ 500 chars**(中文字符按 1 char 计,不按字节)
-- 字符数统计:JS `text.length`(UTF-16 code unit)—— 与文件字节数无关,**只计字符数**
+- 字符数统计:`Array.from(content).length`(Unicode code point 数) — P2-16 修复。emoji 😀 / 罕用汉字 = 1 char(原 `text.length` UTF-16 code unit 会把扩展平面字符算 2 chars)。与文件字节数无关,**只计字符数**
 - **orchestrator 校验时机**:phase 收尾时(Step 9 写完 summary.md 后)**立即**调
   `node scripts/phase-state.js validate-summary <phaseId>` 校验
 - 超 500 chars → **FATAL**,要求重写(精简);不写大文件、不留半成品

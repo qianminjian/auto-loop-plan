@@ -1053,8 +1053,11 @@ function cmdValidateSummary() {
     process.stderr.write(`[phase-state] validate-summary: ${summaryPath} 是空文件。请写入本阶段总结(关键决策 / commit hash / 已知遗留)\n`);
     process.exit(4);
   }
-  // 字符数统计:text.length(JS UTF-16 code unit)—— 中文字符按 1 char 计
-  const charCount = content.length;
+  // 字符数统计:Array.from(content).length(Unicode code point 数) — P2-16 修复
+  // 原 text.length 是 UTF-16 code unit,emoji 😀 / 罕用汉字 = 2 chars 误算
+  // 改用 Array.from 取迭代器(spread 同样),每个 code point 算 1 char
+  // 边界:500 字符正好是 500 chars(含),即 length === 500 → PASS
+  const charCount = Array.from(content).length;
   if (charCount > SUMMARY_MAX_CHARS) {
     // 超长:输出实际字符数 + 前 100 字符预览(辅助用户定位冗余)
     // 预览:取前 100 chars,过长部分加省略号
