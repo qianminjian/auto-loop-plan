@@ -2161,3 +2161,203 @@ describe('Bug-11 过程文件命名与位置规范', () => {
     assert.ok(matched, '必须明确说明 "根目录严禁" 扔过程文件(防止根目录污染)');
   });
 });
+
+// ─── F-01 (P0): Tier 3.5 任务列表型 plan 解析支持 回归 ──────────
+// 症状:`/atdo buginfo/my-fix-plan.md` 第二次解析失败 — 文档含 `## 0.` - `## 5.`
+//       编号小节 + 11 个 `### P0-1` - `### P3-3` 子项,解析器按 `## Phase N:` /
+//       checkbox / "depends on" 模式扫 — 0 命中。本应 ALERT 退出但只"没匹配上"。
+// 根因:atdo 假设"plan = 阶段序列",缺少对"优先级任务列表"型 plan 的支持。
+// 修复:
+//   1. SKILL.md 扩展 Plan Parsing 为 Four-Tier(新增 Tier 3.5 任务列表型)
+//   2. phase-state.js init 支持 stdin 直接传 markdown(`### P?-N` 模式自动识别),
+//      或 JSON 包裹(`{phases: []}` + 额外提供 markdown 文本 — 本测试用前者)
+//   3. Tier 3.5 调度:扫 `### P[0-3]-N` 模式 + 检测 `## Phase N:` 冲突 + FATAL 边界
+describe('F-01 Tier 3.5 任务列表型 plan 解析', () => {
+  const SKILL_PATH = path.join(__dirname, '../../SKILL.md');
+  const skillContent = fs.readFileSync(SKILL_PATH, 'utf8');
+
+  // 测试 1:SKILL.md 包含 "Tier 3.5" 或 "任务列表型" 协议说明
+  test('SKILL.md 包含 "Tier 3.5" 或 "任务列表型" 协议说明', () => {
+    // 必须明确提到 Tier 3.5 或 任务列表型 作为协议名词
+    // 防止以后编辑把这段关键说明删掉又没人发现
+    const re = /Tier\s*3\.5|任务列表型|Task[\s-]?List/i;
+    assert.match(skillContent, re,
+      'SKILL.md 必须包含 "Tier 3.5" 或 "任务列表型" 协议说明');
+  });
+
+  // 测试 2:SKILL.md 包含任务列表型 plan 识别规则(`### P<priority>-<index>`)
+  test('SKILL.md 包含任务列表型 plan 识别规则 (`### P<priority>-<index>`)', () => {
+    // 必须明确给出 `### P<priority>-<index>` 识别规则
+    // 接受多种等价措辞
+    const re = /###\s*P\d+\s*-\s*\d+|P<priority>\s*-\s*<index>|P\[0-3\]\s*-\s*(\d|N)|P\?\s*-\s*N/;
+    assert.match(skillContent, re,
+      'SKILL.md 必须包含任务列表型 plan 识别规则 (`### P<priority>-<index>`)');
+    // 必须解释 priority 取值 0/1/2/3
+    assert.match(skillContent, /priority\s*∈\s*0\s*\|\s*1\s*\|\s*2\s*\|\s*3|priority[^。\n]{0,15}0[^。\n]{0,15}1[^。\n]{0,15}2[^。\n]{0,15}3/,
+      'SKILL.md 必须说明 priority 取值 0/1/2/3');
+  });
+
+  describe('phase-state.js init 支持任务列表型 plan (Tier 3.5)', () => {
+    // 一个标准任务列表型 plan markdown
+    const SAMPLE_MD = `# My Fix Plan
+
+## 0. P0 - 必须修复
+
+### P0-1: state.json schema 文档
+- 在 SKILL.md 增加 schema 章节
+- phase-state.js 错误消息改进
+
+### P0-2: record-commit 多 hash 支持
+- split(',') + trim + 校验
+
+## 1. P1 - 高优先级
+
+### P1-1: 非 Gate commit 规则
+- 改 SKILL.md §8 为按阶段类型区分
+`;
+
+    function freshDir() {
+      return fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-f01-'));
+    }
+
+    // 任务 3:init 接受 markdown 任务列表型 plan,产出预期 phases
+    test('markdown 任务列表型 plan → 解析为 N 个 phase,id 顺序编号 01/02/03', () => {
+      const d = freshDir();
+      try {
+        // 用 stdin 直接传 markdown(无需先转 JSON)
+        const child = spawnSync('node', [SCRIPT, 'init'], {
+          input: SAMPLE_MD,
+          encoding: 'utf8',
+          cwd: d,
+          env: { ...process.env, FORCE_COLOR: '0' },
+        });
+        assert.equal(child.status, 0, `init 应成功,stderr: ${child.stderr}`);
+        const state = JSON.parse(fs.readFileSync(path.join(d, '.phase-execution/state.json'), 'utf8'));
+        // 3 个 phase:P0-1 / P0-2 / P1-1
+        assert.equal(state.phases.length, 3, `应有 3 个 phase,实际: ${state.phases.length}`);
+        // id 顺序编号 01/02/03(与现有 phase-sequence 路径保持一致)
+        assert.equal(state.phases[0].number, '01');
+        assert.equal(state.phases[1].number, '02');
+        assert.equal(state.phases[2].number, '03');
+        // name 保留 P?-N 格式(用户语义)
+        assert.match(state.phases[0].name, /P0-1/);
+        assert.match(state.phases[1].name, /P0-2/);
+        assert.match(state.phases[2].name, /P1-1/);
+        // tasks 数对应
+        assert.equal(state.phases[0].tasks.length, 2);
+        assert.equal(state.phases[1].tasks.length, 1);
+        assert.equal(state.phases[2].tasks.length, 1);
+        // 任务列表型无依赖
+        assert.deepEqual(state.phases[0].dependsOn, []);
+        assert.deepEqual(state.phases[1].dependsOn, []);
+        assert.deepEqual(state.phases[2].dependsOn, []);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    // 任务 4:plan 同时含 `## Phase N:` 和 `### P?-N` → FATAL(语义冲突)
+    test('同时含 `## Phase N:` 和 `### P?-N` → FATAL(语义冲突)', () => {
+      const d = freshDir();
+      try {
+        const CONFLICT_MD = `## Phase 1: 旧格式
+
+### P0-1: 新格式
+- task
+`;
+        const child = spawnSync('node', [SCRIPT, 'init'], {
+          input: CONFLICT_MD,
+          encoding: 'utf8',
+          cwd: d,
+          env: { ...process.env, FORCE_COLOR: '0' },
+        });
+        assert.equal(child.status, 1, '语义冲突应 FATAL');
+        assert.match(child.stderr, /同时含|语义冲突/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    // 任务 5:任务列表型 plan 无 `### P?-N` 子项 → FATAL
+    test('任务列表型 plan priority 越界 (P4-N) → FATAL', () => {
+      const d = freshDir();
+      try {
+        // P4 不在 [0-3] 范围,优先级越界 → 应 FATAL
+        const NO_TASK_MD = `## 0. 优先级列表
+
+### P4-1: 不在白名单的优先级
+- 任务
+`;
+        const child = spawnSync('node', [SCRIPT, 'init'], {
+          input: NO_TASK_MD,
+          encoding: 'utf8',
+          cwd: d,
+          env: { ...process.env, FORCE_COLOR: '0' },
+        });
+        // P4 越界应 FATAL,错误消息提示 priority 越界
+        assert.equal(child.status, 1, 'priority 越界应 FATAL');
+        assert.match(child.stderr, /priority\s*必须|priority\s*越界/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    // 任务 5b:任务列表型 plan 形似但完全没 P?-N → 报"需要 JSON"
+    test('形似 markdown 但完全无 `### P?-N` 模式 → 报"需要 JSON"', () => {
+      const d = freshDir();
+      try {
+        // 只有 ## 0. 标题,没有 ### P?-N(没任何 P 开头)
+        const NO_TASK_MD = `## 0. 标题
+
+### 普通子标题
+- 任务
+`;
+        const child = spawnSync('node', [SCRIPT, 'init'], {
+          input: NO_TASK_MD,
+          encoding: 'utf8',
+          cwd: d,
+          env: { ...process.env, FORCE_COLOR: '0' },
+        });
+        // 完全不像 Tier 3.5 → 报"需要 JSON"(走老路径)
+        assert.equal(child.status, 1);
+        assert.match(child.stderr, /需要有效的\s*JSON/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    // 额外回归测试:JSON 路径仍然工作(向后兼容)
+    test('JSON 路径(向后兼容):{phases:[...]} 仍正常工作', () => {
+      const d = freshDir();
+      try {
+        const r = initPlan(d, JSON.stringify({ phases: [
+          { number: '01', name: 'a', tasks: ['t1'] },
+          { number: '02', name: 'b', tasks: ['t2'], depends_on: ['01'] },
+        ]}));
+        assert.equal(r.code, 0, r.stderr);
+        const state = JSON.parse(fs.readFileSync(path.join(d, '.phase-execution/state.json'), 'utf8'));
+        assert.equal(state.phases.length, 2);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    // 额外测试:checkbox `- [ ]` 也能被识别为 task
+    test('checkbox 形式 `- [ ]` task 也能被识别', () => {
+      const d = freshDir();
+      try {
+        const CHECKBOX_MD = `## 0. 任务
+
+### P0-1: checkbox 测试
+- [ ] 任务 A
+- [x] 任务 B(已完成,也算 task)
+- 普通文本任务 C
+`;
+        const child = spawnSync('node', [SCRIPT, 'init'], {
+          input: CHECKBOX_MD,
+          encoding: 'utf8',
+          cwd: d,
+          env: { ...process.env, FORCE_COLOR: '0' },
+        });
+        assert.equal(child.status, 0, `checkbox 形式应解析成功,stderr: ${child.stderr}`);
+        const state = JSON.parse(fs.readFileSync(path.join(d, '.phase-execution/state.json'), 'utf8'));
+        assert.equal(state.phases.length, 1);
+        // 3 个 task:checkbox A / checkbox B / 纯文本 C
+        assert.equal(state.phases[0].tasks.length, 3);
+        assert.ok(state.phases[0].tasks.some(t => t.includes('任务 A')));
+        assert.ok(state.phases[0].tasks.some(t => t.includes('任务 B')));
+        assert.ok(state.phases[0].tasks.some(t => t.includes('任务 C')));
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+  });
+});

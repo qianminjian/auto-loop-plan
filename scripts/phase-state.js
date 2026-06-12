@@ -305,6 +305,107 @@ function writeHeartbeat(phaseId, taskId, status) {
   fs.writeFileSync(HEARTBEAT_FILE, JSON.stringify(hb, null, 2), 'utf8');
 }
 
+// ─── Tier 3.5 任务列表型 plan 解析 (F-01) ─────────────────────
+// 协议(见 SKILL.md Step 3 "Tier 3.5 — Freeform Markdown 任务列表型"):
+//   - 二级标题 `### P<priority>-<index>` 作为 phase 边界(priority ∈ 0|1|2|3)
+//   - 标题后的内容(到下一个 ### 或 ## 标题)合并成 tasks[] 数组
+//   - 任务列表型 plan 无 depends_on,所有 phase 互相独立
+//   - phase id 用 NN 格式顺序编号(从 00 开始)
+//
+// 调度策略(由 cmdInit 的 detection 阶段调用):
+//   1. 扫 `### P[0-3]-N` 模式 → 命中 ≥ 1 → 启用 Tier 3.5
+//   2. 同时存在 `## Phase N:` 或 `### Phase N:` → FATAL(语义冲突)
+//   3. 无 `### P?-N` 但有 `## N.` 标题 → FATAL(只有分块,无任务项)
+//
+// 输入:plan 原始 markdown 文本
+// 输出:解析后的 phases 数组(每项 {name, tasks, depends_on, ...} 形态,与现有
+//      Tier 3 JSON 路径结构一致 — number/id 在 init 后续阶段统一分配)
+function parseTaskListPlan(text) {
+  const lines = text.split('\n');
+  // 1) 扫所有 `### P[0-3]-N` 标题(必须 ≥ 1)
+  const TASK_HEADER_RE = /^###\s+P([0-3])-(\d{1,2})\b\s*:?\s*(.*)$/;
+  // 阶段序列型冲突检测(必须 0 命中,否则语义冲突 FATAL)
+  const PHASE_HEADER_RE = /^#{2,3}\s*Phase\s+\d+/i;
+  // 任务项:checkbox `- [ ] xxx` / `- [x] xxx` 或纯文本 `- xxx`
+  const TASK_LINE_RE = /^\s*-\s+(?:\[[ xX]\]\s+)?(.+?)\s*$/;
+  const taskHeaders = [];  // {priority, index, name, startLine}
+  let hasPhaseSequence = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (TASK_HEADER_RE.test(line)) {
+      const m = line.match(TASK_HEADER_RE);
+      // 保留 `P0-1: xxx` 完整前缀作为 phase name(用户友好 — 在 phase 列表中
+      // 一眼看出优先级 + 序号)。如果标题只有 `### P0-1` 无 `:` 和内容,name 仍带 `P0-1`
+      const tail = m[3].trim();
+      const fullName = tail ? `P${m[1]}-${m[2]}: ${tail}` : `P${m[1]}-${m[2]}`;
+      taskHeaders.push({
+        priority: parseInt(m[1], 10),
+        index: parseInt(m[2], 10),
+        name: fullName,
+        startLine: i,
+      });
+    }
+    if (PHASE_HEADER_RE.test(line)) hasPhaseSequence = true;
+  }
+  if (taskHeaders.length === 0) return null;  // 调用方负责处理 "无 P?-N" 场景
+  if (hasPhaseSequence) {
+    die('plan 同时含 `## Phase N:` 和 `### P?-N`,语义冲突(阶段序列 vs 任务列表)。请统一为其中一种格式');
+  }
+  // 2) 解析每个 task header 后续内容为 tasks[]
+  const phases = [];
+  for (let i = 0; i < taskHeaders.length; i++) {
+    const h = taskHeaders[i];
+    const nextStart = i + 1 < taskHeaders.length ? taskHeaders[i + 1].startLine : lines.length;
+    // 收集 h.startLine+1 到 nextStart-1 之间的任务行(到下一个 `##` / `###` 标题停止)
+    const tasks = [];
+    for (let j = h.startLine + 1; j < nextStart; j++) {
+      const line = lines[j];
+      // 遇到下一个二级/三级标题(任何)→ 提前终止
+      if (/^#{1,3}\s+/.test(line)) break;
+      const tm = line.match(TASK_LINE_RE);
+      if (tm) {
+        const taskText = tm[1].trim();
+        if (taskText) tasks.push(taskText);
+      }
+    }
+    phases.push({
+      name: h.name,
+      tasks,
+      // 任务列表型无依赖,显式给空数组(供 init 后续统一处理)
+      depends_on: [],
+    });
+  }
+  return phases;
+}
+
+// ─── init plan tier 检测 (F-01) ─────────────────────────────
+// 用于:cmdInit 接受 plan 输入时,根据结构自动选用对应解析器
+// 当前支持:phase-sequence(JSON Tier 2 入口)/ task-list(Tier 3.5)
+// 返回:phases 数组(供 init 后续统一处理 — 字段名 name/tasks/depends_on)
+// 失败 → die(FATAL)
+//
+// 调用场景:cmdInit 解析 plan JSON 后,如果 plan.phases 字段为空/缺失,自动
+//          把整个 stdin 当作 markdown 文本,走 Tier 3.5 检测
+function detectAndParsePlan(plan, rawInput) {
+  // Tier 2:plan JSON 已有 phases[] 字段 → 走老路径(向后兼容)
+  if (Array.isArray(plan.phases) && plan.phases.length > 0) {
+    return { tier: 'phase-sequence', phases: plan.phases };
+  }
+  // Tier 3.5 检测:phases 缺失/为空,但 stdin 给了原始 markdown 文本
+  if (rawInput && typeof rawInput === 'string') {
+    // 简单检测:含 `### P[0-3]-` 模式 → 启用 Tier 3.5
+    if (/^###\s+P[0-3]-\d/m.test(rawInput)) {
+      const phases = parseTaskListPlan(rawInput);
+      if (phases && phases.length > 0) {
+        return { tier: 'task-list', phases };
+      }
+      // 有 P?-N 模式但解析失败(如同时含 Phase N:)→ parseTaskListPlan 已 die
+    }
+  }
+  // 兜底:不是任务列表型,plan.phases 也空 → 让后续 init 报"未找到任何阶段"
+  return { tier: 'phase-sequence', phases: plan.phases || [] };
+}
+
 // ─── 命令处理 ───────────────────────────────────────────
 
 const cmd = process.argv[2];
@@ -313,13 +414,35 @@ const args = process.argv.slice(3);
 function cmdInit() {
   ensureDir();
   let plan;
+  let rawInput = '';  // 保留 stdin 原始文本(F-01 Tier 3.5 检测用)
   try {
     // Read from stdin (avoid shell escaping) or fall back to args[0]
-    const input = fs.readFileSync(0, 'utf8').trim() || args[0];
-    plan = JSON.parse(input);
+    rawInput = fs.readFileSync(0, 'utf8').trim() || args[0];
+    if (!rawInput) throw new Error('empty input');
+    plan = JSON.parse(rawInput);
   } catch {
-    die('init 需要有效的 JSON 输入（通过 stdin 或第一个参数传入）');
+    // F-01:stdin 不是合法 JSON,但可能含 markdown 任务列表型 plan
+    // 1) 优先级合法 (P[0-3]-N) → 走 Tier 3.5
+    // 2) 优先级越界 (P[4-9]-N) → FATAL,提示"形似任务列表型但 priority 越界"
+    // 3) 完全不像任务列表型 → 走老路径,报"需要有效 JSON"
+    if (rawInput) {
+      if (/^###\s+P[0-3]-\d/m.test(rawInput)) {
+        plan = { phases: [] };  // 占位,让 detectAndParsePlan 走 Tier 3.5 路径
+      } else if (/^###\s+P\d-\d/m.test(rawInput)) {
+        die('任务列表型 plan 的 priority 必须在 0/1/2/3 之一,收到形似 `### P?-N` 但 priority 越界。提示:如果 plan 是阶段序列型,使用 `## Phase N:` 格式');
+      } else {
+        die('init 需要有效的 JSON 输入（通过 stdin 或第一个参数传入）');
+      }
+    } else {
+      die('init 需要有效的 JSON 输入（通过 stdin 或第一个参数传入）');
+    }
   }
+  // F-01:Tier 3.5 检测 — 如果 plan JSON 没有 phases[] 字段,但 stdin 文本含
+  // `### P?-N` 模式,自动启用任务列表型解析。phase-sequence 路径走老逻辑(向后兼容)
+  const detected = detectAndParsePlan(plan, rawInput);
+  plan.phases = detected.phases;
+  // 任务列表型无 depends_on,无需环检测(显式空数组,跳过),但保险起见仍走环检测
+  // (空依赖图不会形成环,Kahn 算法会一次性遍历完,无副作用)
   // P2-D: 长度限制(name/goal/tasks 防止 DoS — 单 init 把 state.json 撑到 MB 级)
   const NAME_MAX = 200;
   const GOAL_MAX = 2000;

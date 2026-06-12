@@ -254,17 +254,86 @@ node scripts/phase-state.js lock
 If `--resume`: read state.json, skip plan parsing, go to Execution Loop.
 Otherwise: parse plan → show at checkpoint → wait for confirmation → write state.json.
 
-### Step 3: Plan Parsing (Three-Tier)
+### Step 3: Plan Parsing (Four-Tier)
 
 **Tier 1 — Known format**: If `.planning/ROADMAP.md` exists, use `gsd-tools query roadmap.analyze`.
 
 **Tier 2 — Structured format**: If JSON/YAML with `phases[]`, parse directly.
 
-**Tier 3 — Freeform Markdown**: LLM-based extraction. Look for:
+**Tier 3 — Freeform Markdown 阶段序列型**: LLM-based extraction. Look for:
 - Headers matching `## Phase N:` or `### Phase N:`
 - Numbered sections `1.`, `2.` etc.
 - Checkbox lists `- [ ]` as tasks
 - Keywords "depends on", "gate", "关口" for gate detection
+
+**Tier 3.5 — Freeform Markdown 任务列表型 (F-01)**: 用于"优先级任务列表"型 plan。
+atdo 默认假设"plan = 阶段序列"(Phase 1 → Phase 2 → ...),但有些 plan 是"按
+优先级排列的独立任务项"(P0-1, P0-2, ...),每项独立、互相不强依赖。F-01 起 atdo
+识别并支持这种格式。识别规则:
+
+- **一级标题(分块)**:`## <N>.` 或 `## <N>、`(N 是数字,0-N),**或**纯 `##` 标题(无
+  数字前缀) — 后者视为整个 plan 一个分块
+- **二级标题(任务项)**:`### P<priority>-<index>`(priority ∈ 0|1|2|3,index 是数字,
+  允许 1-2 位),如 `### P0-1: state.json schema 文档` / `### P2-3: 任务校验`
+- **任务内容**:紧跟二级标题,可能是 checkbox `- [ ]` 或纯文本项 `- xxx`
+  两者都可;解析时合并成一个 `tasks[]` 数组(去掉 checkbox 前缀)
+- **依赖关系**:任务列表型 plan **无 depends_on**(`### P?-N` 各项互相独立)
+- **phase id**:用 `NN` 格式顺序编号(从 01 开始,与 Tier 3 阶段序列型保持一致)
+
+**示例(输入)**:
+```markdown
+## 0. P0 - 必须修复
+
+### P0-1: state.json schema 文档
+- 在 SKILL.md 增加 schema 章节
+- phase-state.js 错误消息改进
+
+### P0-2: record-commit 多 hash 支持
+- split(',') + trim + 校验
+
+## 1. P1 - 高优先级
+
+### P1-1: 非 Gate commit 规则
+- ...
+```
+
+**示例(转换后 state.json)**:
+```json
+{
+  "phases": [
+    { "id": "01", "name": "P0-1: state.json schema 文档", "tasks": ["在 SKILL.md 增加 schema 章节", "phase-state.js 错误消息改进"], "depends_on": [] },
+    { "id": "02", "name": "P0-2: record-commit 多 hash 支持", "tasks": ["split(',') + trim + 校验"], "depends_on": [] },
+    { "id": "03", "name": "P1-1: 非 Gate commit 规则", "tasks": [...], "depends_on": [] }
+  ]
+}
+```
+
+**Tier 3.5 识别步骤**(init 内部 detection 阶段,按顺序执行):
+1. **扫 `### P<priority>-<index>` 模式** → 命中 ≥ 1 个 → 启用 Tier 3.5
+   (regex: `/^###\s+P[0-3]-(\d{1,2})\b/m`)
+2. **检查冲突**:同时存在 `## Phase N:` 或 `### Phase N:` 模式 → FATAL
+   (语义冲突:阶段序列和任务列表不能混用)
+3. **解析 phase**:每个 `### P?-N` 作为一个 phase,后续内容(到下一个
+   `### ` 或 `## ` 标题)为该 phase 的 tasks
+4. **id 分配**:从 01 开始顺序编号(同 Tier 3)
+5. **depends_on**:固定 `[]`(任务列表型无依赖)
+
+**Tier 3.5 反例 / 边界**:
+- ❌ 只有 `## 0.` 没有 `### P?-N` → FATAL("Tier 3.5 需要至少一个 P?-N 子项。
+  提示:如果 plan 是阶段序列型,使用 `## Phase N:` 格式;如果是任务列表型,使用
+  `### P<priority>-<index>` 格式")
+- ❌ 同时有 `## Phase N:` 和 `## N.` 或 `### P?-N` → FATAL("plan 同时含阶段序列和
+  任务列表,语义冲突。请统一为其中一种格式")
+- ❌ `### P?-N` 但 priority 不在 0|1|2|3 → FATAL("P 后的优先级必须是 0/1/2/3,
+  收到: <X>")
+- ❌ `### P?-N` 但 N 不是数字 → FATAL("P?-N 的 N 必须是数字(1-2 位),
+  收到: <X>")
+- ❌ `### P?-N` 标题后无任何 task 内容 → 该 phase tasks 为空数组(允许,但建议补充)
+
+**Tier 选择优先级**:
+- init 时按 Tier 1 → Tier 2 → Tier 3 → Tier 3.5 顺序检测,**首个命中即采用**
+  (互斥,不允许 plan 同时属于多档)
+- 详细调度逻辑在 `scripts/phase-state.js` 的 `detectAndParsePlan` 函数中
 
 **CRITICAL**: After freeform parsing, MUST show extracted phases at a checkpoint. Do NOT silently execute.
 
