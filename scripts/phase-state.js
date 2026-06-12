@@ -273,11 +273,24 @@ function releaseLock() {
 // ─── 磁盘检查 ───────────────────────────────────────────
 
 function checkDisk(minMB = 500) {
+  // P3-28: 与 P1-C 一致,改用 execFileSync 参数化(不经过 shell)
+  //   - 旧实现 execSync('df -m . | tail -1') 走 shell + pipe,无注入风险但风格不一致
+  //   - 新实现 execFileSync('df', ['-P', '.']) 取所有行,parse 倒数第二行的 Available
+  //   - 跨平台:macOS df 默认 512-byte blocks,加 -P 用 1024-byte 标准化(更可移植)
   try {
-    const { execSync } = require('child_process');
-    const df = execSync('df -m . | tail -1', { encoding: 'utf8' });
-    const parts = df.trim().split(/\s+/);
-    const available = parseInt(parts[3], 10);
+    const { execFileSync } = require('child_process');
+    const df = execFileSync('df', ['-P', '.'], { encoding: 'utf8' });
+    // df -P 输出格式:
+    //   Filesystem     1024-blocks      Used Available Capacity Mounted on
+    //   /dev/disk1s5   488245288 312345678 175899610    64%    /
+    const lines = df.trim().split('\n');
+    if (lines.length < 2) return { ok: false, note: 'df 输出格式异常,跳过', error: 'lines < 2' };
+    const parts = lines[1].trim().split(/\s+/);
+    // -P 模式下 Available 是第 4 列(索引 3);部分 Unix 是第 3 列
+    const available = parseInt(parts[3] || parts[2], 10);
+    if (Number.isNaN(available)) {
+      return { ok: false, note: 'df 输出无法解析,跳过', error: `parts: ${JSON.stringify(parts)}` };
+    }
     if (available < minMB) {
       die(`磁盘可用空间不足: ${available}MB < ${minMB}MB`);
     }
