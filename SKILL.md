@@ -348,7 +348,7 @@ atdo 默认假设"plan = 阶段序列"(Phase 1 → Phase 2 → ...),但有些 pl
 echo '<json>' | node scripts/phase-state.js init
 ```
 
-## state.json Schema
+## state.json Schema (Bug-02)
 
 `phase-state.js init` 接受的 plan JSON 有 3 条隐性规则,违反时返回 FATAL。
 第一次使用时,先看这里再写 plan — 避免试错。
