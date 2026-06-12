@@ -1218,6 +1218,9 @@ const commands = {
 if (commands[cmd]) {
   commands[cmd]();
 } else {
-  process.stderr.write(`未知命令: ${cmd}\n可用命令: ${Object.keys(commands).join(', ')}\n`);
+  // P2-2: 无参数调用时 cmd 是 undefined,字符串拼接会出现 "未知命令: undefined"
+  // 显式区分两种情况:无参数 / 未知命令
+  const cmdLabel = (cmd === undefined || cmd === null || cmd === '') ? '<未指定>' : cmd;
+  process.stderr.write(`未知命令: ${cmdLabel}\n可用命令: ${Object.keys(commands).join(', ')}\n`);
   process.exit(1);
 }

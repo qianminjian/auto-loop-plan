@@ -2896,3 +2896,31 @@ describe('F-01 Tier 3.5 任务列表型 plan 解析', () => {
     });
   });
 });
+
+// ─── v2.0.x P2/P3 微修复回归 ──────────────────────────────
+// 目的:验证 8 个 P2/P3 修复都生效,避免下次重构意外回退
+describe('v2.0.x P2/P3 微修复', () => {
+  describe('P2-2: 无参数调用 stderr 不含 undefined', () => {
+    test('无任何参数 → stderr 不含 "undefined"', () => {
+      // 必须在项目目录(非空 cwd)下跑,否则 spawnSync 找不到 cwd 报 ENOENT
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p2-2-'));
+      try {
+        const r = runIn(d);
+        assert.equal(r.code, 1, `expected exit 1, got ${r.code}, stderr: ${r.stderr}`);
+        // 修复前:stderr 含 "未知命令: undefined" — 现在改为 "未知命令: <未指定>"
+        assert.doesNotMatch(r.stderr, /undefined/);
+        assert.match(r.stderr, /未知命令/);
+        assert.match(r.stderr, /可用命令/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('未知命令 → stderr 仍标出命令名', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p2-2-'));
+      try {
+        const r = runIn(d, 'bogus-command-xyz');
+        assert.equal(r.code, 1);
+        assert.match(r.stderr, /未知命令: bogus-command-xyz/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+  });
+});
