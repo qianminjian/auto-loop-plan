@@ -3067,4 +3067,90 @@ describe('v2.0.x P2/P3 微修复', () => {
       } finally { fs.rmSync(d, { recursive: true, force: true }); }
     });
   });
+
+  describe('P2-6: watchdog.sh 守护加强', () => {
+    // P2-6: watchdog.sh 第 76 行 node -e require state.json 时,
+    //   虽有内层 try/catch 兜底 RuntimeError/SyntaxError,
+    //   但 0 字节文件 / 文件被外部截断会触发奇怪错误;hb_time 解析类似。
+    // 修复:前置 [ ! -s file ] 守护,避免无意义 node 进程起降
+    // 测试策略:spawnSync 跑 bash watchdog.sh check-heartbeat,验证
+    //   1) 损坏 state.json(非 JSON)→ 不应崩溃,不混入 stderr 噪音
+    //   2) 0 字节 state.json → 同上
+    //   3) 不存在的 state.json → watchdog 正常走默认流程
+
+    const watchdogPath = path.join(__dirname, '..', '..', 'scripts', 'watchdog.sh');
+
+    test('state.json 不存在时 watchdog check-heartbeat 不报错', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p2-6-'));
+      try {
+        fs.mkdirSync(path.join(d, '.phase-execution'), { recursive: true });
+        // 不创建 state.json
+        const r = spawnSync('bash', [watchdogPath, 'check-heartbeat'], {
+          encoding: 'utf8',
+          cwd: d,
+        });
+        // 退出码 0 或 1 都行(无 heartbeat 视为正常,exit 0;有异常 exit 1)
+        assert.ok([0, 1].includes(r.status), `watchdog 应正常退出,实际 status=${r.status}, stderr=${r.stderr}`);
+        assert.ok(r.stdout.includes('心跳文件不存在') || r.stdout.includes('watchdog'),
+          `stdout 应有 watchdog 标记: ${r.stdout}`);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('state.json 损坏(非 JSON)时 watchdog 不应 crash', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p2-6-'));
+      try {
+        const sd = path.join(d, '.phase-execution');
+        fs.mkdirSync(sd, { recursive: true });
+        // 写损坏的 state.json
+        fs.writeFileSync(path.join(sd, 'state.json'), '{not valid json', 'utf8');
+        // 同时写一个有效的 heartbeat
+        fs.writeFileSync(path.join(sd, 'heartbeat.json'),
+          JSON.stringify({ timestamp: new Date().toISOString() }), 'utf8');
+        const r = spawnSync('bash', [watchdogPath, 'check-heartbeat'], {
+          encoding: 'utf8', cwd: d,
+        });
+        // 关键断言:不应有未捕获异常或 stderr 噪音(node SyntaxError)
+        assert.ok([0, 1].includes(r.status), `watchdog 应正常退出,实际 status=${r.status}`);
+        // 即使 state.json 损坏,awaiting 解析失败应走 NO 分支,继续走 heartbeat 检查
+        assert.ok(!r.stderr.includes('SyntaxError'),
+          `stderr 不应含 SyntaxError(node -e try/catch 应已兜住): ${r.stderr}`);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('state.json 0 字节(被外部截断)时 watchdog 不应 crash', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p2-6-'));
+      try {
+        const sd = path.join(d, '.phase-execution');
+        fs.mkdirSync(sd, { recursive: true });
+        // 0 字节 state.json — P2-6 的核心场景:`[ ! -s file ]` 前置守护
+        fs.writeFileSync(path.join(sd, 'state.json'), '', 'utf8');
+        fs.writeFileSync(path.join(sd, 'heartbeat.json'),
+          JSON.stringify({ timestamp: new Date().toISOString() }), 'utf8');
+        const r = spawnSync('bash', [watchdogPath, 'check-heartbeat'], {
+          encoding: 'utf8', cwd: d,
+        });
+        assert.ok([0, 1].includes(r.status), `0 字节 state.json 时 watchdog 应正常退出`);
+        assert.ok(!r.stderr.includes('SyntaxError'), `stderr 不应有 SyntaxError: ${r.stderr}`);
+        assert.ok(!r.stderr.includes('Unexpected end'),
+          `stderr 不应有 "Unexpected end of JSON": ${r.stderr}`);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('heartbeat.json 0 字节时 watchdog 不应 crash', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-p2-6-'));
+      try {
+        const sd = path.join(d, '.phase-execution');
+        fs.mkdirSync(sd, { recursive: true });
+        fs.writeFileSync(path.join(sd, 'state.json'),
+          JSON.stringify({ version: '2.0' }), 'utf8');
+        // 0 字节 heartbeat.json — P2-6 同步守护
+        fs.writeFileSync(path.join(sd, 'heartbeat.json'), '', 'utf8');
+        const r = spawnSync('bash', [watchdogPath, 'check-heartbeat'], {
+          encoding: 'utf8', cwd: d,
+        });
+        assert.ok([0, 1].includes(r.status), `0 字节 heartbeat 时 watchdog 应正常退出`);
+        assert.ok(!r.stderr.includes('SyntaxError'), `stderr 不应有 SyntaxError: ${r.stderr}`);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+  });
 });

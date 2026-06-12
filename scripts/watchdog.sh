@@ -73,7 +73,14 @@ check_heartbeat() {
   # SKILL.md 协议明确:watchdog 看到 awaiting_user_review 应正常 hold,不应判定心跳超时
   if [ -f "$STATE_FILE" ]; then
     local awaiting
-    awaiting=$(node -e "try{const s=require('./$STATE_FILE');process.stdout.write(s.awaiting_user_review?'YES':'NO')}catch{process.stdout.write('NO')}" 2>/dev/null || echo "NO")
+    # P2-6: 前置守护 — state.json 损坏/非 JSON 时 node require 会抛 SyntaxError,
+    # 虽然 node -e 内部 try/catch 已兜底,但再前置一道存在性 + 大小检查,
+    # 减少不必要的 node 进程起降,并避免 0 字节文件触发奇怪错误
+    if [ ! -s "$STATE_FILE" ]; then
+      awaiting="NO"
+    else
+      awaiting=$(node -e "try{const s=require('./$STATE_FILE');process.stdout.write(s.awaiting_user_review?'YES':'NO')}catch{process.stdout.write('NO')}" 2>/dev/null || echo "NO")
+    fi
     if [ "$awaiting" = "YES" ]; then
       echo "[watchdog] 检测到 awaiting_user_review 标记 (manual gate 期间),跳过心跳超时判定"
       return 0
@@ -81,7 +88,12 @@ check_heartbeat() {
   fi
 
   local hb_time
-  hb_time=$(node -e "try{process.stdout.write(require('./$HEARTBEAT_FILE').timestamp)}catch{}" 2>/dev/null || echo "")
+  # P2-6: 前置守护 — heartbeat 文件损坏/0 字节时直接走 fallback,避免无意义 node 调用
+  if [ -s "$HEARTBEAT_FILE" ]; then
+    hb_time=$(node -e "try{process.stdout.write(require('./$HEARTBEAT_FILE').timestamp)}catch{}" 2>/dev/null || echo "")
+  else
+    hb_time=""
+  fi
 
   if [ -z "$hb_time" ]; then
     echo "[watchdog] ALERT: 心跳文件损坏或格式无效，编排器可能崩溃"
