@@ -49,6 +49,8 @@ const VALID_STATUSES = [
   'awaiting_user_review', 'user-review-pass', 'user-review-fail',
 ];
 const ACTIVE_STATUSES = ['pending', 'in_progress', 'executed', 'audited', 'fixed', 'gated', 'awaiting_user_review'];
+// P2-15: 同一 phase 最多累积的确认条数(防 LLM 幻觉 / 恶意循环调用导致 state.json 爆炸)
+const MAX_CONFIRMATIONS_PER_PHASE = 10;
 const STRIKE_THRESHOLDS = { phaseRetry: 3, regression: 2, sameCategory: 5 };
 
 // Bug-10:summary.md 字符数上限(中文字符按 1 char 计,不按字节)
@@ -967,6 +969,11 @@ function cmdRecordConfirm() {
   }
   // 顶层 userConfirmations 数组(按需创建,init 不预创建)
   if (!Array.isArray(state.userConfirmations)) state.userConfirmations = [];
+  // P2-15: 防止 LLM 幻觉 / 恶意脚本在循环中累积,加单 phase 上限
+  const phaseConfirms = state.userConfirmations.filter(c => c.phaseId === phaseId);
+  if (phaseConfirms.length >= MAX_CONFIRMATIONS_PER_PHASE) {
+    die(`record-confirm: phase ${phaseId} 已累积 ${phaseConfirms.length} 条确认,达上限 ${MAX_CONFIRMATIONS_PER_PHASE}。可能 LLM 循环调用 — 请人工介入。`);
+  }
   const entry = {
     phaseId,
     scope: 'phase-full',  // 固定值,目前协议只支持 phase-full
