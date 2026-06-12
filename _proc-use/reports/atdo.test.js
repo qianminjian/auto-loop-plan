@@ -2185,6 +2185,38 @@ describe('Bug-10 summary.md 长度校验(≤500 chars)', () => {
       assert.match(r.stderr, /前\s*100\s*字符预览/);
     });
 
+    // P2-13: Step 9 集成 — 写超长 → 校验失败 → 重写 → 再校验 → 通过
+    test('P2-13: Step 9 集成流程(写超长 → 校验失败 → 重写 → 校验通过)', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-step9-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        // 模拟 Step 9 命令流:
+        //   mkdir -p .phase-execution/phases/01
+        //   cat > .phase-execution/phases/01/summary.md <<'EOF'
+        //   <超长 600 chars>
+        //   EOF
+        //   node phase-state.js validate-summary 01
+        const phaseDir = path.join(d, '.phase-execution', 'phases', '01');
+        fs.mkdirSync(phaseDir, { recursive: true });
+        const summaryPath = path.join(phaseDir, 'summary.md');
+        // 1) 第一次写:超长(600 chars)→ 校验应 exit 1
+        const longContent = 'a'.repeat(600);
+        fs.writeFileSync(summaryPath, longContent, 'utf8');
+        const r1 = runIn(d, 'validate-summary', '01');
+        assert.equal(r1.code, 1, `Step 9 第一次写超长应 FATAL,实际: ${r1.code}, stderr: ${r1.stderr}`);
+        assert.match(r1.stderr, /600\s*chars/);
+        // 2) 重写:合规内容(300 chars)→ 校验应 exit 0
+        const okContent = 'b'.repeat(300);
+        fs.writeFileSync(summaryPath, okContent, 'utf8');
+        const r2 = runIn(d, 'validate-summary', '01');
+        assert.equal(r2.code, 0, `Step 9 重写后应 PASS,实际: ${r2.code}, stderr: ${r2.stderr}`);
+        assert.match(r2.stdout, /is\s*300\s*chars/);
+        // 3) state.json 应记录该 phase(集成兼容 — summary 写流程不影响 state)
+        const state = JSON.parse(fs.readFileSync(path.join(d, '.phase-execution', 'state.json'), 'utf8'));
+        assert.ok(state.phases.find(p => p.number === '01'), 'phase 01 仍在 state.json');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
     test('超长中文(501 个中文字符)→ exit 1(中文字符按 1 char 计)', () => {
       // Bug-10 关键:中文字符按 1 char 计,不按字节
       const content501zh = '中'.repeat(501);
