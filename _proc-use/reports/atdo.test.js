@@ -578,6 +578,52 @@ describe('sanitize 覆盖 2026 主流 token', () => {
   });
 });
 
+// P1-6: cmdSanitize 与 SKILL.md 安全集成 E2E
+// 场景:含密钥的 audit-report.md → sanitize → 验证 state.json.securityEvents 含事件
+describe('P1-6: sanitize → state.json.securityEvents 集成 E2E', () => {
+  test('sanitize 后 state.json.securityEvents 数组含事件', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-test-'));
+    try {
+      initPlan(dir, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+      const f = path.join(dir, '.phase-execution', 'phases', '01', 'audit-report.md');
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.writeFileSync(f, 'AKIAIOSFODNN7EXAMPLE\nsk-ant-api03-abcdefghijklmnop\n');
+      const r = runIn(dir, 'sanitize', f);
+      assert.equal(r.code, 0);
+      assert.match(r.stdout, /"sanitized":\s*true/);
+      assert.match(r.stdout, /"secretsFound":\s*2/);
+      // 验证 state.json
+      const state = JSON.parse(fs.readFileSync(path.join(dir, '.phase-execution', 'state.json'), 'utf8'));
+      assert.ok(Array.isArray(state.securityEvents), 'securityEvents 应是数组');
+      assert.ok(state.securityEvents.length >= 1, '应至少有 1 个事件');
+      const evt = state.securityEvents[state.securityEvents.length - 1];
+      assert.ok(evt.file.endsWith('audit-report.md'), '事件应包含 file 字段');
+      assert.ok(typeof evt.at === 'string' && evt.at.includes('T'), '事件应包含 ISO at 字段');
+      assert.ok(evt.secretsFound >= 2, `secretsFound 应 >= 2 (实际 ${evt.secretsFound})`);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('干净文件 sanitize 不写 securityEvents', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-test-'));
+    try {
+      initPlan(dir, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+      const f = path.join(dir, '.phase-execution', 'clean.txt');
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.writeFileSync(f, 'no secrets here');
+      const r = runIn(dir, 'sanitize', f);
+      assert.match(r.stdout, /"sanitized":\s*false/);
+      const state = JSON.parse(fs.readFileSync(path.join(dir, '.phase-execution', 'state.json'), 'utf8'));
+      // securityEvents 应仍是 init 时的空数组(或不存在 — 测试不强制非空)
+      const events = state.securityEvents || [];
+      assert.equal(events.length, 0, '干净文件不应写 securityEvents');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 // P0: SKILL.md 敏感文件检测正则 — 覆盖 .env.local / config/.env / id_rsa 等
 // 镜像 SKILL.md:275 的两阶段过滤(命中 → 排除白名单)
 describe('敏感文件检测正则 (SKILL.md:275)', () => {
