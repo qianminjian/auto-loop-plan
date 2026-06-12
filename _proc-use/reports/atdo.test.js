@@ -2764,6 +2764,31 @@ describe('F-01 Tier 3.5 任务列表型 plan 解析', () => {
       } finally { fs.rmSync(d, { recursive: true, force: true }); }
     });
 
+    // P3-26: 任务列表型 plan `### P-1`(无 priority,即 priority 字段缺失)→ 报"需要 JSON"或 FATAL
+    //   协议:SKILL.md L313 regex 是 /###\s+P[0-3]-\d/,必须含 1 位数字 priority
+    //   `### P-1` 不匹配(无 priority 数字),init 应走"完全不像 Tier 3.5"路径报"需要 JSON"
+    test('P3-26: 任务列表型 `### P-1`(无 priority)→ 报"需要 JSON"或 FATAL', () => {
+      const d = freshDir();
+      try {
+        // P 后面直接 -1,没有 priority 数字
+        const NO_PRIORITY_MD = `## 0. 优先级列表
+
+### P-1: 缺 priority
+- 任务
+`;
+        const child = spawnSync('node', [SCRIPT, 'init'], {
+          input: NO_PRIORITY_MD,
+          encoding: 'utf8',
+          cwd: d,
+          env: { ...process.env, FORCE_COLOR: '0' },
+        });
+        // `### P-1` 不匹配 /###\s+P[0-3]-\d/ → 走"完全不像 Tier 3.5"路径
+        // 期望:FATAL + stderr 含"需要有效的 JSON"或类似
+        assert.equal(child.status, 1, '无 priority 应 FATAL');
+        assert.match(child.stderr, /需要有效的\s*JSON|完全不像/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
     // 任务 5b:任务列表型 plan 形似但完全没 P?-N → 报"需要 JSON"
     test('形似 markdown 但完全无 `### P?-N` 模式 → 报"需要 JSON"', () => {
       const d = freshDir();
