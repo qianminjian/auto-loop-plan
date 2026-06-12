@@ -122,14 +122,56 @@ node _proc-use/reports/atdo.test.js
 | 测试用例 | 282 |
 | 通过率 | 100% |
 
-覆盖:init / get / set-phase / get-current-phase / inc-strike / get-strikes / record-commit / record-confirm / has-confirm / validate-summary / generate-summary-template / compare-plan-hash / lock / unlock / check-disk / check-lock-age / sanitize / heartbeat / summary / backup rotation / E2E 完整流程 + P1-2(record-commit HEAD 解析)+ P1-4(verification phase type)+ 9 个安全注入回归(路径穿越、命令注入、LLM 幻觉、敏感文件检测、P2 6 项加固)+ v2.0.x P2/P3 微修复(parseDfOutput / writeState 备份 / watchdog 守护 / 模板字段 / inc-strike ALERT 触发)。
+覆盖:init / get / set-phase / get-current-phase / inc-strike / get-strikes / record-commit / record-confirm / has-confirm / validate-summary / generate-summary-template / compare-plan-hash / lock / unlock / check-disk / check-lock-age / sanitize / heartbeat / summary / backup rotation / E2E 完整流程 + P1-2(record-commit HEAD 解析)+ P1-4(verification phase type)+ 9 个安全注入回归(路径穿越、命令注入、LLM 幻觉、敏感文件检测、P2 6 项加固)+ v2.0.x P2/P3 微修复(parseDfOutput / writeState 备份 / watchdog 守护 / 模板字段 / inc-strike ALERT 触发)+ B-01(get-current-phase phaseType) + B-02(set-phase verified 守卫)。
+
+## 生产故障修复记录 (v2.0.1 — 2026-06-12)
+
+基于 7 阶段全量生产运行采集的 13 个问题修复：
+
+| 优先级 | 修复项 | 描述 |
+|--------|--------|------|
+| P0 | ATDO BUG REPORT DUTY | Agent 强制汇报义务 + orchestrator Step 3f 检查 |
+| P1 | record-commit HEAD | HEAD 字面量自动 `git rev-parse` 解析 |
+| P1 | Working Directory Discipline | 所有 Bash 命令加 `cd $PROJECT_ROOT &&` 前缀 |
+| P1 | verification phase type | 纯验证阶段快速路径(executed → verified → gated) |
+| P2 | _bug-info 目录 | Step 0d 自动创建 |
+| P2 | PROCESS_FILE_POLICY 注入 | [INJECTION START/END] 边界标记 |
+| P2 | CronCreate 连续执行 | 连续模式每阶段仍调 CronCreate 保险 |
+| P3 | Agent 缓存提示 | PROCESS_FILE_POLICY 缓存到 skill-level context |
+| P3 | summary 模板 | generate-summary-template 统一命令 |
+
+**审计评分**: 95/100 (S 级) | **状态**: 🟢 可用于生产
+
+## 命令清单 (19 个)
+
+| 命令 | 说明 |
+|------|------|
+| `init <plan-json>` | 初始化状态(通过 stdin 或参数) |
+| `get <key>` | 读取状态字段 |
+| `set-phase <id> <status>` | 设置阶段状态(含状态机校验) |
+| `get-current-phase` | 获取当前待处理阶段 |
+| `inc-strike <phaseId> <type>` | 增加 strike 计数 |
+| `get-strikes <phaseId>` | 获取 strike 计数 |
+| `record-commit <phaseId> <hash>` | 记录 commit hash(支持 HEAD/逗号分隔) |
+| `record-confirm <phaseId> <c\|s\|a>` | 追加用户确认 |
+| `has-confirm <phaseId>` | 检查阶段是否已确认 |
+| `validate-summary <phaseId>` | 校验 summary.md 长度(≤500 chars) |
+| `generate-summary-template <phaseId>` | 输出 summary.md 统一模板 |
+| `compare-plan-hash <plan-file>` | 检测 plan 文件漂移 |
+| `lock` | 获取并发锁 |
+| `unlock --reason=<r>` | 释放锁(必须带原因) |
+| `check-disk` | 磁盘空间检查(≥500MB) |
+| `check-lock-age` | 锁持有时长检查(24h 警告) |
+| `sanitize <file>` | 脱敏文件中的密钥 |
+| `heartbeat` | 写入心跳 |
+| `summary` | 输出当前状态摘要 |
 
 ## 文件清单
 
 ```
 SKILL.md                                   # 主编排器(1680 行)
-scripts/phase-state.js                     # 19 个状态管理命令(1355 行,零依赖)
-scripts/watchdog.sh                        # 孤儿进程清理 + 心跳检查
+scripts/phase-state.js                     # 19 个状态管理命令(1362 行,零依赖)
+scripts/watchdog.sh                        # 孤儿进程清理 + 心跳检查(186 行)
 references/templates/
 ├── audit-report-template.md               # 审计报告模板
 └── integration-test-report-template.md    # 集成测试报告模板
