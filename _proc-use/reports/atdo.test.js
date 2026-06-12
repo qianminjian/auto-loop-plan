@@ -391,6 +391,59 @@ describe('inc-strike 三维度 + 参数校验', () => {
     const r = runIn(dir, 'inc-strike', '01', 'regression');
     assert.match(r.stdout, /"maxedRegression":\s*true/);
   });
+
+  // P3-25: get-strikes 边界测试
+  describe('phase-state.js get-strikes 命令', () => {
+    test('regression 维度独立累加:get-strikes 不传 phaseId 返全局 strikes', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-gs-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        runIn(d, 'inc-strike', '01', 'regression');
+        runIn(d, 'inc-strike', '01', 'regression');
+        // 不传 phaseId → 返整个 strikes(全局视图)
+        const r = runIn(d, 'get-strikes');
+        assert.equal(r.code, 0, `get-strikes 应 exit 0,stderr: ${r.stderr}`);
+        assert.match(r.stdout, /"regression":\s*2/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('phaseRetry 维度:get-strikes <phaseId> 返 phaseRetry map', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-gs-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        runIn(d, 'inc-strike', '01', 'execution');
+        runIn(d, 'inc-strike', '01', 'execution');
+        runIn(d, 'inc-strike', '01', 'audit');
+        const r = runIn(d, 'get-strikes', '01');
+        assert.equal(r.code, 0);
+        assert.match(r.stdout, /"execution":\s*2/);
+        assert.match(r.stdout, /"audit":\s*1/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('phaseRetry 不存在的 phaseId → 返空对象(不 FATAL)', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-gs-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        // 99 不存在 → 返 {} 而不是 die
+        const r = runIn(d, 'get-strikes', '99');
+        assert.equal(r.code, 0, `get-strikes 不存在 phase 应 exit 0,实际: ${r.code}, stderr: ${r.stderr}`);
+        assert.match(r.stdout, /\{\}/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('type 含特殊字符(连字符) → 仍能记录', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-gs-'));
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        // type 含连字符 — inc-strike 不强校验 type 内容
+        // 验证 cmdIncStrike 把 type 视为字符串 key
+        runIn(d, 'inc-strike', '01', 'special-type');
+        const r = runIn(d, 'get-strikes', '01');
+        assert.match(r.stdout, /"special-type":\s*1/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+  });
 });
 
 describe('record-commit hash 校验', () => {
