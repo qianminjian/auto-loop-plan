@@ -556,12 +556,9 @@ function cmdInit() {
       regression: 0,
       sameCategory: {},
     },
-    networkStatus: {
-      consecutiveFailures: 0,
-      lastSuccessfulCall: null,
-    },
+    // P2-7: 删除死字段 networkStatus(未实现 set-network-status 命令,init 写入后无任何读写)
     securityEvents: [],
-    exitReason: null,
+    // P2-7: 删除死字段 exitReason(同上)
   };
   // Bug-09:planHash 写入顶层(仅当 plan JSON 提供了它,缺失时字段不存在 — 向后兼容)
   if (planHash !== null) {
@@ -898,7 +895,7 @@ function cmdSummary() {
     total,
     current: current ? { number: current.number, name: current.name, status: current.status } : null,
     strikes: state.strikes,
-    exitReason: state.exitReason,
+    // P2-7: 删掉死字段 exitReason
   }));
 }
 
