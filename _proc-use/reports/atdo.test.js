@@ -2094,3 +2094,70 @@ describe('Bug-10 summary.md 长度校验(≤500 chars)', () => {
     });
   });
 });
+
+// ─── Bug-11 过程文件命名与位置规范 ────────────────────────────────
+// 症状:根目录 / _proc-use/ 出现 v3.0-check-1781181895.log(带 timestamp)
+//       和 v3.0-run-1.log(不带)混着。命名规则由 agent 自定,orchestrator
+//       没规范,后续清理非常难。
+// 修复:SKILL.md 新增 "过程文件命名与位置规范 (Bug-11)" 章节,定义
+//       命名格式 {phaseId}-{stepName}-{index}.{ext} + stepName 白名单
+//       + 根目录严禁扔过程文件。
+describe('Bug-11 过程文件命名与位置规范', () => {
+  const SKILL_PATH = path.join(__dirname, '../../SKILL.md');
+
+  // 测试 1:SKILL.md 包含 "过程文件命名与位置规范" 章节
+  test('SKILL.md 包含 "过程文件命名与位置规范" 章节', () => {
+    const skillContent = fs.readFileSync(SKILL_PATH, 'utf8');
+    assert.match(
+      skillContent,
+      /过程文件命名与位置规范/,
+      '必须新增 "过程文件命名与位置规范" 章节,明文写命名 + 位置约束'
+    );
+  });
+
+  // 测试 2:SKILL.md 包含 "禁止带 timestamp 后缀" 或 "index 从 1 递增" 等明确说明
+  test('SKILL.md 包含"禁止带 timestamp"或"index 从 1 递增"明确说明', () => {
+    const skillContent = fs.readFileSync(SKILL_PATH, 'utf8');
+    // 二选一:必须明确禁止 timestamp 后缀,或明确 index 从 1 递增
+    const noTimestamp = /禁止带\s*timestamp|timestamp\s*后缀|带\s*timestamp|不能带\s*timestamp/i;
+    const indexFrom1 = /index\s*从\s*1\s*递增|index\s*为\s*1|index\s*为\s*`?1`?|从\s*`?1`?\s*开始/i;
+    assert.ok(
+      noTimestamp.test(skillContent) || indexFrom1.test(skillContent),
+      '必须明确说明 "禁止带 timestamp 后缀" 或 "index 从 1 递增" 之一'
+    );
+  });
+
+  // 测试 3:SKILL.md 包含命名格式示例,如 <phaseId>-<stepName>-<index>.<ext>
+  test('SKILL.md 包含命名格式示例 <phaseId>-<stepName>-<index>.<ext>', () => {
+    const skillContent = fs.readFileSync(SKILL_PATH, 'utf8');
+    // 匹配命名格式说明:phaseId-stepName-index.ext 形式
+    // 接受: {phaseId}-{stepName}-{index}.{ext} 或 <phaseId>-<stepName>-<index>.<ext> 或反引号包裹
+    const formatPatterns = [
+      /\{phaseId\}.*\{stepName\}.*\{index\}.*\{ext\}/,
+      /<phaseId>-<stepName>-<index>\.<ext>/,
+      /phaseId.*stepName.*index.*ext/,
+    ];
+    const matched = formatPatterns.some(p => p.test(skillContent));
+    assert.ok(matched, '必须给出命名格式示例,如 <phaseId>-<stepName>-<index>.<ext>');
+    // 同时验证有正例(01-execute-1.log 等)
+    assert.match(
+      skillContent,
+      /01-execute-1\.log|01-audit-1\.md|gate-2-integration-1\.md/,
+      '必须给出具体正例文件名(01-execute-1.log / 01-audit-1.md / gate-2-integration-1.md 之一)'
+    );
+  });
+
+  // 测试 4:SKILL.md 包含根目录严禁扔过程文件的说明
+  test('SKILL.md 包含根目录严禁扔过程文件的说明', () => {
+    const skillContent = fs.readFileSync(SKILL_PATH, 'utf8');
+    // 必须明确说明根目录不允许过程文件
+    const noRootPatterns = [
+      /根目录严禁/,
+      /根目录\s*不[允许容].{0,15}过程文件/,
+      /根目录不能扔|根目录不能放|根目录禁止/,
+      /过程文件.{0,15}根目录/,
+    ];
+    const matched = noRootPatterns.some(p => p.test(skillContent));
+    assert.ok(matched, '必须明确说明 "根目录严禁" 扔过程文件(防止根目录污染)');
+  });
+});

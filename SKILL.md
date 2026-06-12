@@ -77,6 +77,73 @@ License、IDE 配置。CI 配置统一放 .github/。
 无新孤儿?
 ```
 
+## 过程文件命名与位置规范 (Bug-11)
+
+> **背景**:根目录 / `_proc-use/` / 各种临时目录经常出现 `v3.0-check-1781181895.log`
+> (带 timestamp)和 `v3.0-run-1.log`(不带)混着的情况。命名规则由 agent
+> 自定,orchestrator 没规范,后续清理非常难。本节给出**强制命名 + 位置**
+> 双约束。
+
+### 1. 命名格式
+
+**`{phaseId}-{stepName}-{index}.{ext}`**
+
+- `phaseId`:2 位数字字符串(`00` / `01` / `02` / ... / `10`)
+  - 关卡(gate)产物用 `gate-N-<label>` 形式,如 `gate-2-integration`
+- `stepName`:白名单,严格从以下取一:
+  - `execute` — 阶段执行
+  - `audit` — 阶段审计
+  - `fix` — bug 修复
+  - `gate` — 关卡检查
+  - `checkpoint` — checkpoint 记录
+  - `summary` — 阶段总结
+  - `plan-snippet` — 计划片段
+  - **新增类别需明文加白名单**(不可临时加新值)
+- `index`:从 `1` 递增。同一 phaseId + stepName 多次运行,index 加 1
+- `ext`:常规扩展名(`md` / `log` / `json` / `txt`)
+
+### 2. 位置约束
+
+- **阶段产物**:`_proc-use/<phaseId>/` 下
+  - 例:`_proc-use/01/01-execute-1.log`、`_proc-use/02/02-audit-1.md`
+- **关卡产物**:`_proc-use/gates/<label>/` 下
+  - 例:`_proc-use/gates/integration/gate-2-integration-1.md`
+- **主状态文件**:`_proc-use/state.json`(运行时由 phase-state.js 维护)
+- **根目录严禁扔过程文件**(除 `README.md` / `SKILL.md` / `LICENSE` /
+  `.gitignore` / `.github/` 等仓库元数据)
+- **`.phase-execution/`**(gitignored)— 运行时 transient 状态,可保留
+
+### 3. 反例 vs 正例
+
+```
+❌ v3.0-check-1781181895.log   # 带 timestamp,污染文件名
+❌ v3.0-run-1.log              # phaseId 格式不对(v3.0)
+❌ audit_report.md              # 无 phaseId,无 index
+❌ 1-execute-1.log              # phaseId 必须 2 位(01)
+❌ 01-EXEC-1.log                # stepName 必须在白名单内(用小写)
+✅ 01-execute-1.log
+✅ 01-audit-1.md
+✅ 02-fix-2.log                 # 同一 phase+step 第二次,index=2
+✅ gate-2-integration-1.md      # 关卡产物
+✅ 00-plan-snippet-1.md         # plan 片段
+```
+
+### 4. orchestrator 检查行为(软约束)
+
+- 阶段开始前 / 完成后,扫描 `_proc-use/<phaseId>/` 下文件,是否符合命名规范
+- 不符合 → 输出 **WARN**(默认不阻断,仅提示)
+- 根目录发现过程文件(非仓库元数据)→ 输出 **WARN**(不阻断)
+- 这是**软约束**——LLM agent 不一定严格遵守,主要靠命名规范本身
+  的"语义清晰、易清理"特性减少误用。**不引入硬阻断**——避免 agent
+  因小文件名不规范而拒绝 commit,反而拖慢项目进度。
+
+### 5. 明确禁止
+
+- ❌ 文件名带 timestamp 后缀(如 `-1781181895`、`-20260612`)
+- ❌ 同一 phase + step 多次运行覆盖同名文件(应递增 index)
+- ❌ 过程文件散落根目录 / `scripts/` / `references/` 等核心代码目录
+- ❌ stepName 取白名单之外的值(如 `run` / `check` / `test` / `debug`)
+
 ## Arguments
 
 | Argument | Effect |
