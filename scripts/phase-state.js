@@ -409,7 +409,8 @@ function detectAndParsePlan(plan, rawInput) {
   // Tier 3.5 检测:phases 缺失/为空,但 stdin 给了原始 markdown 文本
   if (rawInput && typeof rawInput === 'string') {
     // 简单检测:含 `### P[0-3]-` 模式 → 启用 Tier 3.5
-    if (/^###\s+P[0-3]-\d/m.test(rawInput)) {
+    // P3-29:统一 regex 与 SKILL.md L331 协议 /\d{1,2}\b/(1-2 位 index + word boundary)
+    if (/^###\s+P[0-3]-\d{1,2}\b/m.test(rawInput)) {
       const phases = parseTaskListPlan(rawInput);
       if (phases && phases.length > 0) {
         return { tier: 'task-list', phases };
@@ -440,10 +441,13 @@ function cmdInit() {
     // 1) 优先级合法 (P[0-3]-N) → 走 Tier 3.5
     // 2) 优先级越界 (P[4-9]-N) → FATAL,提示"形似任务列表型但 priority 越界"
     // 3) 完全不像任务列表型 → 走老路径,报"需要有效 JSON"
+    // P3-29:统一 regex 与 SKILL.md L331 协议 /^###\s+P[0-3]-(\d{1,2})\b/m
+    //   旧实现用 \d(单)只接受 1 位 index;新实现 \d{1,2}\b 接受 1-2 位
+    //   TASK_HEADER_RE(L341)已用 \d{1,2}\b,这里保持一致
     if (rawInput) {
-      if (/^###\s+P[0-3]-\d/m.test(rawInput)) {
+      if (/^###\s+P[0-3]-\d{1,2}\b/m.test(rawInput)) {
         plan = { phases: [] };  // 占位,让 detectAndParsePlan 走 Tier 3.5 路径
-      } else if (/^###\s+P\d-\d/m.test(rawInput)) {
+      } else if (/^###\s+P\d-\d{1,2}\b/m.test(rawInput)) {
         die('任务列表型 plan 的 priority 必须在 0/1/2/3 之一,收到形似 `### P?-N` 但 priority 越界。提示:如果 plan 是阶段序列型,使用 `## Phase N:` 格式');
       } else {
         die('init 需要有效的 JSON 输入（通过 stdin 或第一个参数传入）');
