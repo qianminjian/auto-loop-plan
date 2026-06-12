@@ -2086,6 +2086,92 @@ describe('Bug-09 state.json 是 single source of truth + planHash 防漂移', ()
       } finally { fs.rmSync(d, { recursive: true, force: true }); }
     });
   });
+
+  // P2-17: compare-plan-hash <plan-file> 命令 — Bug-09 协议层承诺的 hash 对比自动化
+  describe('phase-state.js compare-plan-hash 命令', () => {
+    const crypto = require('crypto');
+    function freshDir() {
+      return fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-cph-'));
+    }
+
+    test('hash 一致 → exit 0 + match: true', () => {
+      const d = freshDir();
+      try {
+        // 写 plan file + 算 md5
+        const planFile = path.join(d, 'plan.json');
+        const planContent = '{"phases":[{"number":"01","name":"a"}],"planHash":"placeholder"}';
+        fs.writeFileSync(planFile, planContent, 'utf8');
+        const realHash = crypto.createHash('md5').update(planContent, 'utf8').digest('hex');
+        // init 时用真 hash(替换 placeholder)
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }], planHash: realHash }));
+        const r = runIn(d, 'compare-plan-hash', planFile);
+        assert.equal(r.code, 0, `hash 一致应 exit 0,实际: ${r.code}, stderr: ${r.stderr}`);
+        assert.match(r.stdout, /"match":\s*true/);
+        assert.match(r.stdout, /"currentHash":\s*"[a-f0-9]{32}"/);
+        assert.match(r.stdout, /"stateHash":\s*"[a-f0-9]{32}"/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('hash 不一致 → exit 1 + match: false + 含 note', () => {
+      const d = freshDir();
+      try {
+        const planFile = path.join(d, 'plan.json');
+        const planContent = '{"phases":[{"number":"01","name":"a"}]}';
+        fs.writeFileSync(planFile, planContent, 'utf8');
+        // init 用一个错的 hash
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }], planHash: 'a'.repeat(32) }));
+        const r = runIn(d, 'compare-plan-hash', planFile);
+        assert.equal(r.code, 1, `hash 不一致应 exit 1,实际: ${r.code}, stderr: ${r.stderr}`);
+        assert.match(r.stdout, /"match":\s*false/);
+        assert.match(r.stdout, /plan\s*file\s*已被修改/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('state.json 无 planHash 字段 → exit 2', () => {
+      const d = freshDir();
+      try {
+        const planFile = path.join(d, 'plan.json');
+        fs.writeFileSync(planFile, 'content', 'utf8');
+        // init 不传 planHash
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        const r = runIn(d, 'compare-plan-hash', planFile);
+        assert.equal(r.code, 2, `state 无 planHash 应 exit 2,实际: ${r.code}, stderr: ${r.stderr}`);
+        assert.match(r.stderr, /state\.json\s*无\s*planHash/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('plan-file 不存在 → exit 3', () => {
+      const d = freshDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }], planHash: 'a'.repeat(32) }));
+        const r = runIn(d, 'compare-plan-hash', '/nonexistent/plan.json');
+        assert.equal(r.code, 3, `plan-file 不存在应 exit 3,实际: ${r.code}`);
+        assert.match(r.stderr, /不存在/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('plan-file 空文件 → exit 4', () => {
+      const d = freshDir();
+      try {
+        const planFile = path.join(d, 'empty.json');
+        fs.writeFileSync(planFile, '', 'utf8');
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }], planHash: 'a'.repeat(32) }));
+        const r = runIn(d, 'compare-plan-hash', planFile);
+        assert.equal(r.code, 4, `空文件应 exit 4,实际: ${r.code}, stderr: ${r.stderr}`);
+        assert.match(r.stderr, /空文件/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('无参数 → die + 列可用命令', () => {
+      const d = freshDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        const r = runIn(d, 'compare-plan-hash');
+        assert.equal(r.code, 1);
+        assert.match(r.stderr, /需要 plan-file 路径/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+  });
 });
 
 // ─── Bug-10 (P3): summary.md 长度校验(≤500 chars)回归 ──────

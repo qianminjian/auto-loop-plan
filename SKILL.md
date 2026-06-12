@@ -483,6 +483,10 @@ echo '<json>' | node scripts/phase-state.js init
 - 协议层不强制 orchestrator 做这个检查(避免误报 + 性能开销)
 - `--resume` 时**不**做 hash 校验(plan 可能在 init 之后改过,
   但 state.json 是合法的当前状态,不应被 hash 不匹配阻断 resume)
+- **P2-17 新增**:`node scripts/phase-state.js compare-plan-hash <plan-file>`
+  自动算 plan-file md5 并与 state.planHash 对比,退出码 0=match / 1=mismatch
+  / 2=state 无 planHash / 3=plan-file 不存在 / 4=plan-file 为空。
+  这是 `md5 -q + get planHash + 比对` 的命令封装,避免 orchestrator 重复实现。
 
 ### 4. planHash 字段细节(phase-state.js init 行为)
 

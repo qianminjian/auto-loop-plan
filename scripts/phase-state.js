@@ -1077,6 +1077,54 @@ function cmdValidateSummary() {
   process.stdout.write(`✅ summary.md is ${charCount} chars (≤${SUMMARY_MAX_CHARS})`);
 }
 
+// ─── planHash 对比 (Bug-09 / P2-17) ──────────────────────
+// 协议:state.json 顶层 planHash 是 init 时记录的 plan md5(由用户/上游算好传入)
+//   orchestrator 可选做"当前 plan-file vs state.planHash"对比,纯防御性
+//   不一致 → 输出 INFO(不阻断),用于检测 init 后 plan file 被误改
+// 此命令:读 plan-file 算 md5,与 state.planHash 对比,输出 match/mismatch
+// 退出码:
+//   0 — hash 一致(matched)
+//   1 — hash 不一致(mismatch)
+//   2 — state.json 无 planHash 字段(向后兼容 — init 时未传入)
+//   3 — plan-file 不存在 / 读取失败
+//   4 — plan-file 内容为空(空文件无 md5)
+function cmdComparePlanHash() {
+  const planFile = args[0];
+  if (!planFile) die('compare-plan-hash 需要 plan-file 路径作为参数');
+  // 读 plan file 内容(路径白名单不强求 — plan file 是用户/项目自有文件,非 .phase-execution/)
+  if (!fs.existsSync(planFile)) {
+    process.stderr.write(`[phase-state] compare-plan-hash: plan file ${planFile} 不存在\n`);
+    process.exit(3);
+  }
+  let content;
+  try {
+    content = fs.readFileSync(planFile, 'utf8');
+  } catch (e) {
+    process.stderr.write(`[phase-state] compare-plan-hash: 读取 ${planFile} 失败: ${e.message}\n`);
+    process.exit(3);
+  }
+  if (content.length === 0) {
+    process.stderr.write(`[phase-state] compare-plan-hash: ${planFile} 是空文件,无 md5\n`);
+    process.exit(4);
+  }
+  // 算 md5
+  const crypto = require('crypto');
+  const currentHash = crypto.createHash('md5').update(content, 'utf8').digest('hex');
+  // 读 state.planHash
+  const state = readState();
+  if (!state.planHash) {
+    process.stderr.write(`[phase-state] compare-plan-hash: state.json 无 planHash 字段(可能是旧 init 调用未传入)。当前 plan-file md5 = ${currentHash}\n`);
+    process.exit(2);
+  }
+  if (currentHash === state.planHash) {
+    process.stdout.write(JSON.stringify({ match: true, currentHash, stateHash: state.planHash }));
+    process.exit(0);
+  } else {
+    process.stdout.write(JSON.stringify({ match: false, currentHash, stateHash: state.planHash, note: 'plan file 已被修改(init 后),state.json 仍按原 plan 执行' }));
+    process.exit(1);
+  }
+}
+
 // ─── 入口 ────────────────────────────────────────────────
 
 const commands = {
@@ -1090,6 +1138,7 @@ const commands = {
   'record-confirm': cmdRecordConfirm,  // Bug-07
   'has-confirm': cmdHasConfirm,        // Bug-07
   'validate-summary': cmdValidateSummary,  // Bug-10
+  'compare-plan-hash': cmdComparePlanHash,  // Bug-09 / P2-17
   lock: () => { process.stdout.write(JSON.stringify(acquireLock())); },
   unlock: cmdUnlock,
   'check-disk': () => { process.stdout.write(JSON.stringify(checkDisk())); },
