@@ -2130,6 +2130,26 @@ describe('Bug-10 summary.md 长度校验(≤500 chars)', () => {
       assert.match(r.stderr, /501\s*chars/);
     });
 
+    // P2-10: emoji/扩展平面字符数边界 — P2-16 改用 Array.from(code point) 后,1 emoji = 1 char
+    test('P2-10: 500 emoji → exit 0(code point 数 = 500,边界 PASS)', () => {
+      // P2-16 修复后:Array.from('😀'.repeat(500)).length === 500(不是 1000)
+      //   旧实现 text.length 算 UTF-16 code unit,500 emoji = 1000 chars → 会 FAIL
+      //   新实现 Array.from 算 Unicode code point,500 emoji = 500 chars → PASS
+      const content500emoji = '😀'.repeat(500);
+      writeSummary('01', content500emoji);
+      const r = runIn(dir, 'validate-summary', '01');
+      assert.equal(r.code, 0, `500 emoji(code point=500)应 PASS,实际: ${r.code}, stderr: ${r.stderr}`);
+      assert.match(r.stdout, /is\s*500\s*chars/);
+    });
+
+    test('P2-10: 501 emoji → exit 1(超 500 code point 边界)', () => {
+      const content501emoji = '😀'.repeat(501);
+      writeSummary('02', content501emoji);
+      const r = runIn(dir, 'validate-summary', '02');
+      assert.equal(r.code, 1, `501 emoji(code point=501)应 FAIL,实际: ${r.code}, stderr: ${r.stderr}`);
+      assert.match(r.stderr, /501\s*chars/);
+    });
+
     test('summary.md 不存在 → exit 2', () => {
       // 删除 summary.md,模拟"还没写"场景
       const summaryPath = path.join(dir, '.phase-execution/phases/01/summary.md');
