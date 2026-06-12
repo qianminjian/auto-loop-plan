@@ -1690,6 +1690,77 @@ describe('Bug-08 lock 持有语义明文化 + unlock 严格化', () => {
       } finally { fs.rmSync(d, { recursive: true, force: true }); }
     });
   });
+
+  // P3-24: check-lock-age 命令 — Bug-08 协议层 24h lock 警告的代码层实现
+  describe('phase-state.js check-lock-age 命令', () => {
+    function freshLockDir() {
+      return fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-lockage-'));
+    }
+
+    test('lock 不存在 → exit 0 + exists: false', () => {
+      const d = freshLockDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        // 不调用 lock,直接 check-lock-age
+        const r = runIn(d, 'check-lock-age');
+        assert.equal(r.code, 0, 'lock 不存在应 exit 0');
+        assert.match(r.stdout, /"exists":\s*false/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('lock 持有 < 24h → exit 0 + warning: false', () => {
+      const d = freshLockDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        // 模拟新获取的 lock(startTime = now)
+        runIn(d, 'lock');
+        const r = runIn(d, 'check-lock-age');
+        assert.equal(r.code, 0, `新 lock 应 exit 0,实际: ${r.code}, stderr: ${r.stderr}`);
+        assert.match(r.stdout, /"warning":\s*false/);
+        assert.match(r.stdout, /"exists":\s*true/);
+        // ageHours < 24(刚获取)
+        const m = r.stdout.match(/"ageHours":\s*([\d.]+)/);
+        assert.ok(m && parseFloat(m[1]) < 24, 'ageHours 应 < 24');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('lock 持有 ≥ 24h → exit 1 + warning: true + stderr WARN', () => {
+      const d = freshLockDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        // 手动写一个 25h 前的 lock 文件
+        const lockDir = path.join(d, '.phase-execution');
+        fs.mkdirSync(lockDir, { recursive: true });
+        const oldStart = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+        fs.writeFileSync(
+          path.join(lockDir, 'lock'),
+          JSON.stringify({ pid: 99999, startTime: oldStart, hostname: 'fake-host' }, null, 2),
+          'utf8'
+        );
+        const r = runIn(d, 'check-lock-age');
+        assert.equal(r.code, 1, `25h lock 应 exit 1,实际: ${r.code}`);
+        assert.match(r.stdout, /"warning":\s*true/);
+        assert.match(r.stderr, /\[WARN\]\s*lock\s*持有.*小时/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('lock 损坏(startTime 缺失) → exit 0 + 跳过警告', () => {
+      const d = freshLockDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        const lockDir = path.join(d, '.phase-execution');
+        fs.mkdirSync(lockDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(lockDir, 'lock'),
+          JSON.stringify({ pid: 99999 }, null, 2),  // 无 startTime
+          'utf8'
+        );
+        const r = runIn(d, 'check-lock-age');
+        assert.equal(r.code, 0, 'lock 损坏应 exit 0(不警告)');
+        assert.match(r.stdout, /lock\s*损坏.*跳过/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+  });
 });
 
 // ─── Bug-07 (P2): Checkpoint 协议改 Phase-scoped 幂等 token 回归 ──

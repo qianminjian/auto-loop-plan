@@ -241,6 +241,12 @@ node scripts/phase-state.js lock
 - 警告但需人工确认(不自动释放)
 - 24h 后若 lock 仍存在 → 编排器应输出警告到 stderr,但**不会自动 unlock**
 - 由用户决定是否手动 `unlock --reason=aborted`
+- **P3-24 新增**:`node scripts/phase-state.js check-lock-age` 命令
+  主动检查 lock 持有时长(可由 cron / 编排器定期调):
+  - 退出码 0 — lock 不存在 或 ageHours < 24
+  - 退出码 1 — ageHours ≥ 24(警告,stderr 输出含 startTime / pid)
+  - stdout 始终输出 `{exists, ageHours, warning, startTime, pid}` JSON
+  - lock 损坏 / startTime 不可解析 → 视为不警告(exit 0)
 
 **6. lock 释放时机(unlock 严格化,Bug-08 修复)**:
 - ✅ **允许** unlock 的场景(必须显式 `--reason` 参数):

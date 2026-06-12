@@ -1077,6 +1077,56 @@ function cmdValidateSummary() {
   process.stdout.write(`✅ summary.md is ${charCount} chars (≤${SUMMARY_MAX_CHARS})`);
 }
 
+// ─── 锁持有时长检查 (Bug-08 / P3-24) ──────────────────────
+// 协议:lock 持有超过 24h 警告但需人工确认(不自动释放)
+// 场景:某个 phase 跑死/被 kill,lock 残留。24h 后自动警告提醒人工 unlock。
+// 退出码:
+//   0 — lock 不存在 / 持有时长 < 24h(正常)
+//   1 — lock 持有时长 ≥ 24h(警告,但不 FATAL,不自动 unlock)
+function cmdCheckLockAge() {
+  if (!fs.existsSync(LOCK_FILE)) {
+    process.stdout.write(JSON.stringify({ exists: false, ageHours: 0, warning: false }));
+    return;  // 退出码 0
+  }
+  const lock = readJSON(LOCK_FILE);
+  if (!lock || !lock.startTime) {
+    // lock 损坏 — 不警告(让 acquireLock 在下次启动时清理)
+    process.stdout.write(JSON.stringify({ exists: true, ageHours: 0, warning: false, note: 'lock 损坏,跳过' }));
+    return;
+  }
+  const startMs = new Date(lock.startTime).getTime();
+  if (Number.isNaN(startMs)) {
+    process.stdout.write(JSON.stringify({ exists: true, ageHours: 0, warning: false, note: 'lock.startTime 不可解析,跳过' }));
+    return;
+  }
+  const ageMs = Date.now() - startMs;
+  const ageHours = ageMs / (1000 * 60 * 60);
+  const LOCK_AGE_WARN_HOURS = 24;
+  if (ageHours >= LOCK_AGE_WARN_HOURS) {
+    // 警告:输出到 stderr(让 orchestrator / cron 看到),不 FATAL
+    process.stderr.write(
+      `[WARN] lock 持有 ${ageHours.toFixed(1)} 小时(超过 ${LOCK_AGE_WARN_HOURS}h)。` +
+      `可能 phase 跑死 / 被 kill 而未 unlock。请人工确认后 unlock(--reason=aborted|alert)。\n`
+    );
+    process.stdout.write(JSON.stringify({
+      exists: true,
+      ageHours: Math.round(ageHours * 10) / 10,
+      warning: true,
+      startTime: lock.startTime,
+      pid: lock.pid,
+    }));
+    process.exit(1);
+  }
+  // 正常:输出持有时长,exit 0
+  process.stdout.write(JSON.stringify({
+    exists: true,
+    ageHours: Math.round(ageHours * 10) / 10,
+    warning: false,
+    startTime: lock.startTime,
+    pid: lock.pid,
+  }));
+}
+
 // ─── planHash 对比 (Bug-09 / P2-17) ──────────────────────
 // 协议:state.json 顶层 planHash 是 init 时记录的 plan md5(由用户/上游算好传入)
 //   orchestrator 可选做"当前 plan-file vs state.planHash"对比,纯防御性
@@ -1142,6 +1192,7 @@ const commands = {
   lock: () => { process.stdout.write(JSON.stringify(acquireLock())); },
   unlock: cmdUnlock,
   'check-disk': () => { process.stdout.write(JSON.stringify(checkDisk())); },
+  'check-lock-age': cmdCheckLockAge,  // Bug-08 / P3-24
   sanitize: cmdSanitize,
   heartbeat: () => { writeHeartbeat(args[0], args[1], args[2]); process.stdout.write(JSON.stringify({ ok: true })); },
   summary: cmdSummary,
