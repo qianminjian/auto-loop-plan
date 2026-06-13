@@ -1435,6 +1435,7 @@ auto-pass 合规判据：orchestrator 直跑 5 维验证（fileExistence/syntax/
 // ─── atdo-001 P2: check-workspace --suggest ─────────────────
 // 命令: check-workspace --suggest
 //   stdin: git status --porcelain 输出（XY <filename>，?? <filename> 等）
+//   stdin: git status --porcelain 输出（XY <filename>，?? <filename> 等）
 //   stdout 决策:
 //     CLEAN                            (空输入 = 工作区干净)
 //     SUGGEST_AUTO_STAGE\n<files>      (全部脏文件在豁免目录)
@@ -1496,6 +1497,120 @@ function cmdCheckWorkspace() {
   }
 }
 
+// ─── atdo-004 P2: advance-phase ─────────────────────────────
+// 命令: advance-phase <phaseId> [--to=<status>]
+//   F3 修订：按 phase.gateType 决策终点
+//     gateType=auto      → 推到 completed
+//     gateType=manual    → 推到 gated（让 manual gate 接管）
+//     gateType=hybrid    → 推到 gated
+//   边界:
+//     awaiting_user_review / completed / user-review-fail → die
+
+function chooseAutoPath(current, nexts, target) {
+  // 1. 直达
+  if (nexts.includes(target)) return target;
+  // 2. BFS 找能到 target 的分支
+  for (const next of nexts) {
+    if (canReach(next, target)) return next;
+  }
+  return null;
+}
+
+function canReach(from, target) {
+  if (from === target) return true;
+  const visited = new Set([from]);
+  const queue = [from];
+  while (queue.length > 0) {
+    const cur = queue.shift();
+    const nexts = ALLOWED_TRANSITIONS[cur] || [];
+    for (const n of nexts) {
+      if (n === target) return true;
+      if (!visited.has(n)) {
+        visited.add(n);
+        queue.push(n);
+      }
+    }
+  }
+  return false;
+}
+
+function cmdAdvancePhase() {
+  const phaseId = args[0];
+  if (!phaseId) die('advance-phase 需要 phaseId');
+
+  // 解析 --to=<status>
+  let targetStatus = null;
+  for (const a of args.slice(1)) {
+    const m = a.match(/^--to(?:=(.+))?$/);
+    if (m && m[1]) targetStatus = m[1];
+  }
+
+  const state = readState();
+  const phase = state.phases.find(p => p.number === phaseId);
+  if (!phase) die(`phase ${phaseId} 不存在`);
+
+  // 边界：终态 / manual gate 中 → die
+  if (['completed', 'user-review-fail', 'awaiting_user_review'].includes(phase.status)) {
+    die(`phase ${phaseId} 当前 status="${phase.status}"，不可 advance（终态或 manual gate 中）`);
+  }
+
+  // 默认终点按 gateType 决策（F3 修订）
+  if (!targetStatus) {
+    const gateType = phase.gateType || 'auto';
+    targetStatus = (gateType === 'manual' || gateType === 'hybrid') ? 'gated' : 'completed';
+  }
+
+  // 校验 targetStatus
+  if (!VALID_STATUSES.includes(targetStatus)) {
+    die(`advance-phase: 无效 targetStatus "${targetStatus}"`);
+  }
+
+  // 已到目标 → noop OK（manual gate 已 gated 时常见）
+  if (phase.status === targetStatus) {
+    process.stdout.write(JSON.stringify({ ok: true, phaseId, status: targetStatus, noop: true }));
+    return;
+  }
+
+  // 循环推进：每步调命令行 set-phase 复用全部校验
+  const { spawnSync } = require('child_process');
+  let current = phase.status;
+  let safety = 20;
+  const recordPath = [current];
+  while (current !== targetStatus && safety-- > 0) {
+    const nexts = ALLOWED_TRANSITIONS[current];
+    if (!nexts || nexts.length === 0) {
+      die(`advance-phase: 无法从 "${current}" 推进（无合法转换）`);
+    }
+    const next = chooseAutoPath(current, nexts, targetStatus);
+    if (!next) {
+      die(`advance-phase: 找不到从 "${current}" 到 "${targetStatus}" 的路径`);
+    }
+    // 调命令行 set-phase（复用全部校验逻辑：终态保护 / 游标推进 / awaiting_user_review 处理 / etc）
+    const res = spawnSync('node', [__filename, 'set-phase', phaseId, next], {
+      encoding: 'utf8',
+      cwd: process.cwd(),
+      env: process.env,
+    });
+    if (res.status !== 0) {
+      die(`advance-phase: set-phase ${current} → ${next} 失败: ${(res.stderr || '').trim()}`);
+    }
+    recordPath.push(next);
+    current = next;
+  }
+
+  if (safety <= 0) {
+    die(`advance-phase: safety limit 触发（推进步骤超 20），疑似死循环`);
+  }
+
+  process.stdout.write(JSON.stringify({
+    ok: true,
+    phaseId,
+    from: phase.status,
+    to: targetStatus,
+    path: recordPath,
+  }));
+}
+
 // ─── 入口 ────────────────────────────────────────────────
 
 const commands = {
@@ -1512,6 +1627,7 @@ const commands = {
   'generate-summary-template': cmdGenerateSummaryTemplate,  // P3-4
   'proxy-recovery-decision': cmdProxyRecoveryDecision,  // atdo-003 P1
   'check-workspace': cmdCheckWorkspace,  // atdo-001 P2
+  'advance-phase': cmdAdvancePhase,  // atdo-004 P2
   'compare-plan-hash': cmdComparePlanHash,  // Bug-09 / P2-17
   lock: () => { process.stdout.write(JSON.stringify(acquireLock())); },
   unlock: cmdUnlock,

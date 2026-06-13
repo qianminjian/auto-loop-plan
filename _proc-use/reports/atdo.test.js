@@ -4084,7 +4084,8 @@ describe('atdo-004 advance-phase', () => {
   test('--to=verified → 走 verification 路径', () => {
     const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-004-6-'));
     try {
-      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a', tasks: ['t1'] }]}));
+      // phaseType=verification 才能走 verified 快速路径（P1-4）
+      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a', tasks: ['t1'], phase_type: 'verification' }]}));
       const r = runIn(d, 'advance-phase', '01', '--to=verified');
       assert.equal(r.code, 0, r.stderr);
       const state = JSON.parse(fs.readFileSync(path.join(d, '.phase-execution/state.json'), 'utf8'));

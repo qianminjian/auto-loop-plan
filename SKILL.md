@@ -732,6 +732,18 @@ fi
 **4. Agent Audit** (unless `--no-audit` flag is set)
 
 > **P1-4 协议明确**:`--no-audit` 仅跳过"agent audit 报告生成"(不 spawn gsd-code-reviewer),但状态机 **必须** 仍走 `executed → audited`(orchestrator 在该模式下直接 `set-phase ... audited`,不依赖 audit 报告)。这样 `--no-audit` 与 Bug-06 严格状态机无矛盾:状态机推进不停,只是少一个 agent spawn。
+>
+> **推荐用 `advance-phase` 批量推进 (atdo-004)**:`--no-audit` 模式下 orchestrator 用单一命令替代多次 `set-phase`:
+>
+> ```bash
+> node scripts/phase-state.js advance-phase <phaseId>
+> # 按 phase.gateType 自动决策终点:
+> #   gateType=auto      → 推到 completed
+> #   gateType=manual    → 推到 gated (让 manual gate 接管)
+> #   gateType=hybrid    → 推到 gated
+> # 边界: awaiting_user_review / completed / user-review-fail → die
+> # --to=<status> 强制目标 (路径上须可达)
+> ```
 
 Spawn gsd-code-reviewer agent:
 ```
