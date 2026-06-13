@@ -3993,3 +3993,127 @@ describe('atdo-001 check-workspace --suggest', () => {
     assert.ok(lines.length >= 5, '应列出 4 个豁免文件');
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// atdo-004 P2: advance-phase 批量推进命令
+// ─────────────────────────────────────────────────────────────
+// 命令: advance-phase <phaseId> [--to=<status>]
+//   F3 修订：按 phase.gateType 决策终点
+//     gateType=auto → 推到 completed
+//     gateType=manual/hybrid → 推到 gated（让 manual gate 接管）
+//   边界:
+//     awaiting_user_review / completed / user-review-fail → die（终态或 manual gate 中）
+//     --to 必须在合法路径上
+
+describe('atdo-004 advance-phase', () => {
+
+  // 辅助：用于到达某中间状态
+  function advanceTo(d, phaseId, targetStatus) {
+    const allSteps = ['in_progress', 'executed', 'audited', 'fixed', 'gated'];
+    for (const s of allSteps) {
+      runIn(d, 'set-phase', phaseId, s);
+      if (s === targetStatus) return;
+    }
+  }
+
+  // 1
+  test('pending → advance 默认 → completed (auto gate)', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-004-1-'));
+    try {
+      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a', tasks: ['t1'] }]}));
+      const r = runIn(d, 'advance-phase', '01');
+      assert.equal(r.code, 0, r.stderr);
+      const state = JSON.parse(fs.readFileSync(path.join(d, '.phase-execution/state.json'), 'utf8'));
+      assert.equal(state.phases[0].status, 'completed', `期望 completed 实际 ${state.phases[0].status}`);
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 2
+  test('executed → advance 默认 → completed', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-004-2-'));
+    try {
+      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a', tasks: ['t1'] }]}));
+      advanceTo(d, '01', 'executed');
+      const r = runIn(d, 'advance-phase', '01');
+      assert.equal(r.code, 0, r.stderr);
+      const state = JSON.parse(fs.readFileSync(path.join(d, '.phase-execution/state.json'), 'utf8'));
+      assert.equal(state.phases[0].status, 'completed');
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 3
+  test('gated (gateType=auto) → advance 默认 → completed', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-004-3-'));
+    try {
+      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a', tasks: ['t1'] }]}));
+      advanceTo(d, '01', 'gated');
+      const r = runIn(d, 'advance-phase', '01');
+      assert.equal(r.code, 0, r.stderr);
+      const state = JSON.parse(fs.readFileSync(path.join(d, '.phase-execution/state.json'), 'utf8'));
+      assert.equal(state.phases[0].status, 'completed');
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 4
+  test('gated (gateType=manual) → advance 默认 → 推到 gated 不变（已在 gated）', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-004-4-'));
+    try {
+      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a', tasks: ['t1'], is_gate: true, gate_type: 'manual' }]}));
+      advanceTo(d, '01', 'gated');
+      // gateType=manual → 终点=gated，已在 gated → 应直接返回 OK
+      const r = runIn(d, 'advance-phase', '01');
+      assert.equal(r.code, 0, r.stderr);
+      const state = JSON.parse(fs.readFileSync(path.join(d, '.phase-execution/state.json'), 'utf8'));
+      assert.equal(state.phases[0].status, 'gated', 'manual gate 应停在 gated');
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 5
+  test('--to=audited → 推进后停在 audited', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-004-5-'));
+    try {
+      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a', tasks: ['t1'] }]}));
+      const r = runIn(d, 'advance-phase', '01', '--to=audited');
+      assert.equal(r.code, 0, r.stderr);
+      const state = JSON.parse(fs.readFileSync(path.join(d, '.phase-execution/state.json'), 'utf8'));
+      assert.equal(state.phases[0].status, 'audited');
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 6
+  test('--to=verified → 走 verification 路径', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-004-6-'));
+    try {
+      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a', tasks: ['t1'] }]}));
+      const r = runIn(d, 'advance-phase', '01', '--to=verified');
+      assert.equal(r.code, 0, r.stderr);
+      const state = JSON.parse(fs.readFileSync(path.join(d, '.phase-execution/state.json'), 'utf8'));
+      assert.equal(state.phases[0].status, 'verified');
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 7
+  test('completed → advance → die', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-004-7-'));
+    try {
+      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a', tasks: ['t1'] }]}));
+      runToCompleted(d, '01');
+      const r = runIn(d, 'advance-phase', '01');
+      assert.notEqual(r.code, 0);
+      assert.match(r.stderr, /completed|终态/);
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 8
+  test('awaiting_user_review → advance → die', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-004-8-'));
+    try {
+      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a', tasks: ['t1'], is_gate: true, gate_type: 'manual' }]}));
+      advanceTo(d, '01', 'gated');
+      runIn(d, 'set-phase', '01', 'awaiting_user_review');
+      const r = runIn(d, 'advance-phase', '01');
+      assert.notEqual(r.code, 0);
+      assert.match(r.stderr, /awaiting_user_review|manual gate/);
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+});
