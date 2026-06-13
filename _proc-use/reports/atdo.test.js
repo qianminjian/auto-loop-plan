@@ -4118,3 +4118,93 @@ describe('atdo-004 advance-phase', () => {
     } finally { fs.rmSync(d, { recursive: true, force: true }); }
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// atdo-002 P2: gate_noise_expected 协议层白名单
+// ─────────────────────────────────────────────────────────────
+// plan schema 扩展: phase.gate_noise_expected: string[]
+//   F5 修订: 校验对齐 cmdInit task 阈值（每元素 ≤ 500、最多 50 个）
+//   cmdGetCurrentPhase 输出 gateNoiseExpected 字段
+//   SKILL.md § Gate Noise Whitelist 章节
+
+describe('atdo-002 gate_noise_expected', () => {
+
+  // 1
+  test('init 接受 gate_noise_expected 数组', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-002-1-'));
+    try {
+      const r = initPlan(d, JSON.stringify({ phases: [
+        { number: '01', name: 'a', tasks: ['t1'], gate_noise_expected: ['check-meta', 'check-consistency'] }
+      ]}));
+      assert.equal(r.code, 0, r.stderr);
+      const state = JSON.parse(fs.readFileSync(path.join(d, '.phase-execution/state.json'), 'utf8'));
+      assert.deepEqual(state.phases[0].gateNoiseExpected, ['check-meta', 'check-consistency']);
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 2
+  test('init 拒绝非数组 → die', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-002-2-'));
+    try {
+      const r = initPlan(d, JSON.stringify({ phases: [
+        { number: '01', name: 'a', tasks: ['t1'], gate_noise_expected: 'not-array' }
+      ]}));
+      assert.notEqual(r.code, 0);
+      assert.match(r.stderr, /gate_noise_expected|数组/);
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 3
+  test('init 拒绝单元素超 500 chars → die', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-002-3-'));
+    try {
+      const longStr = 'x'.repeat(501);
+      const r = initPlan(d, JSON.stringify({ phases: [
+        { number: '01', name: 'a', tasks: ['t1'], gate_noise_expected: [longStr] }
+      ]}));
+      assert.notEqual(r.code, 0);
+      assert.match(r.stderr, /gate_noise_expected|长度|500/);
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 4
+  test('init 拒绝数组超 50 个 → die', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-002-4-'));
+    try {
+      const arr = Array.from({ length: 51 }, (_, i) => `item-${i}`);
+      const r = initPlan(d, JSON.stringify({ phases: [
+        { number: '01', name: 'a', tasks: ['t1'], gate_noise_expected: arr }
+      ]}));
+      assert.notEqual(r.code, 0);
+      assert.match(r.stderr, /gate_noise_expected|数量|50/);
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 5
+  test('get-current-phase 输出 gateNoiseExpected 字段', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-002-5-'));
+    try {
+      initPlan(d, JSON.stringify({ phases: [
+        { number: '01', name: 'a', tasks: ['t1'], gate_noise_expected: ['check-x', 'check-y'] }
+      ]}));
+      const r = runIn(d, 'get-current-phase');
+      assert.equal(r.code, 0, r.stderr);
+      const parsed = JSON.parse(r.stdout);
+      assert.deepEqual(parsed.gateNoiseExpected, ['check-x', 'check-y'],
+        `期望 gateNoiseExpected = ['check-x', 'check-y']，实际: ${JSON.stringify(parsed)}`);
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 6
+  test('字段缺失向后兼容 → 默认空数组', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-002-6-'));
+    try {
+      // 不传 gate_noise_expected
+      initPlan(d, JSON.stringify({ phases: [
+        { number: '01', name: 'a', tasks: ['t1'] }
+      ]}));
+      const state = JSON.parse(fs.readFileSync(path.join(d, '.phase-execution/state.json'), 'utf8'));
+      assert.deepEqual(state.phases[0].gateNoiseExpected, [], '缺失字段应默认空数组');
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+});
