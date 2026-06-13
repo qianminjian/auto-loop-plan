@@ -166,6 +166,7 @@ node _proc-use/reports/atdo.test.js
 | `has-confirm <phaseId>` | 检查阶段是否已确认 |
 | `validate-summary <phaseId>` | 校验 summary.md 长度(≤500 chars) |
 | `generate-summary-template <phaseId>` | 输出 summary.md 统一模板 |
+| `proxy-recovery-decision <phaseId> <verdict> [--evidence=<path>] [--reason=...]` | atdo-003：proxy 报告恢复决策（auto-pass 需 evidence 5 维全 PASS / manual-required 升 manual gate）|
 | `compare-plan-hash <plan-file>` | 检测 plan 文件漂移 |
 | `lock` | 获取并发锁 |
 | `unlock --reason=<r>` | 释放锁(必须带原因) |

@@ -679,7 +679,7 @@ After agent returns:
 - Parse for `[AUTO-EXEC-RESULT: ...]` marker
 - **Marker parsing rules**: Search the ENTIRE agent output for the marker line — it may appear inside code blocks, with leading/trailing whitespace, or after other content. Use: `grep -oP '\[AUTO-EXEC-RESULT:.*?\]'` or equivalent pattern match. If the agent output contains multiple markers (e.g., from restarted sub-agents), use the LAST one.
 - **methodology 字段校验(强制)**:从 marker 提取 `methodology=...`,必须是 `proxy|real|mixed` 之一;缺失或非法值 → 视为 FAILED,触发 fix loop 要求 agent 重报(不静默放行)
-- **proxy 报告处理(Bug-05 核心)**:若 `methodology=proxy` → 暂停 gate 流程,**不允许按 agent 报告的 SUCCESS/PASS 自行通过 gate**;输出警告 "⚠️ Gate X proxy-only, requires human sign-off or real validation",将 phase 标为 INCONCLUSIVE(等同"待人工放行或 real 验证")。**proxy 测试不构成 gate 通过的充分证据**——orchestrator 必须显式要求人工放行(由用户/上游确认)或 agent 重跑 real 验证后,才能进入下一阶段
+- **proxy 报告处理(Bug-05 核心)**:若 `methodology=proxy` → 暂停 gate 流程,**不允许按 agent 报告的 SUCCESS/PASS 自行通过 gate**;输出警告 "⚠️ Gate X proxy-only, requires human sign-off or real validation",将 phase 标为 INCONCLUSIVE(等同"待人工放行或 real 验证")。**proxy 测试不构成 gate 通过的充分证据**——orchestrator 必须显式要求人工放行(由用户/上游确认)或 agent 重跑 real 验证后,才能进入下一阶段。**标准恢复流程见 §Proxy Recovery Protocol (atdo-003)**,用命令 `proxy-recovery-decision <id> auto-pass|manual-required` 固化决策
 - No marker found → treat as AGENT_OUTPUT_INCOMPLETE, retry once with shorter prompt
 - Update state: `executed`
 
@@ -1166,7 +1166,7 @@ completed            → (终态)
 
 **5. Bug-05 与 Manual gate 的关系**
 
-- Bug-05 规定 `methodology=proxy` 报告不得判定 PASS,要求人工放行(human sign-off)。
+- Bug-05 规定 `methodology=proxy` 报告不得判定 PASS,要求人工放行(human sign-off)。**标准恢复操作序列见 §Proxy Recovery Protocol (atdo-003)**,含 auto-pass / manual-required 二选一决策树。
 - Manual gate 是 **Bug-05 协议的程序化实现**:把"人工放行"从一个临时补救流程,提升为协议级状态机。
 - 触发条件:phase.gateType = manual / hybrid(显式声明),或 §7 检测到 methodology=proxy 时由 orchestrator
   主动将 phase 升级为 manual gate(set-phase ... awaiting_user_review)。
@@ -1522,6 +1522,8 @@ After EVERY agent call, run these independently (not via agent):
 > - 恢复 gate 流程前,必须把 state.json 中该 phase 状态回退到 `executed`
 >   (而非 `gated` / `completed`),防止误标通关
 > - **proxy 测试不构成 gate 通过的充分证据** — 这是协议硬约束,不是建议
+>
+> **Proxy auto-pass 合规判据 (atdo-003 / F1)**:auto-pass 仅在 orchestrator 提交 evidence 文件(含 fileExistence / syntax / diffRange / debugResidue / secretScan 5 维全 PASS)时合规。**agent 自报告 SUCCESS 永不可触发 auto-pass**。命令 `proxy-recovery-decision <id> auto-pass --evidence=<path>` 强制校验 evidence 文件,缺失或非 PASS → die。详见 §Proxy Recovery Protocol。
 >
 > 适用范围: Gate Phase 任何包含 `[AUTO-EXEC-RESULT]` marker 的 agent 调用;
 > 含 gsd-executor / gsd-code-reviewer / gsd-integration-checker。
