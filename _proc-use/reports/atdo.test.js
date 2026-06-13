@@ -3865,3 +3865,131 @@ describe('atdo-003 proxy-recovery-decision', () => {
     } finally { fs.rmSync(d, { recursive: true, force: true }); }
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// atdo-001 P2: check-workspace --suggest 命令
+// ─────────────────────────────────────────────────────────────
+// 命令: check-workspace --suggest
+//   stdin: git status --porcelain 输出
+//   stdout 决策:
+//     CLEAN                            (空输入)
+//     SUGGEST_AUTO_STAGE\n<files>      (全部豁免目录)
+//     BLOCK: <non-exempt-files>        (任一非豁免)
+//   豁免目录: .phase-execution/ / doc/ / _proc-use/ / .serena/
+
+// helper: 调命令时传 stdin
+function runWithStdin(cwd, stdin, ...args) {
+  const res = spawnSync('node', [SCRIPT, ...args], {
+    encoding: 'utf8',
+    cwd,
+    input: stdin,
+    env: { ...process.env, FORCE_COLOR: '0' },
+  });
+  return {
+    ok: res.status === 0,
+    stdout: (res.stdout || '').trim(),
+    stderr: (res.stderr || '').trim(),
+    code: res.status || 0,
+  };
+}
+
+describe('atdo-001 check-workspace --suggest', () => {
+  let dir;
+  before(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-001-'));
+  });
+  after(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+
+  // 1
+  test('全脏文件在 doc/ → SUGGEST_AUTO_STAGE', () => {
+    const stdin = ' M doc/BEACON.md\n M doc/PLAN1.md\n';
+    const r = runWithStdin(dir, stdin, 'check-workspace', '--suggest');
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^SUGGEST_AUTO_STAGE/);
+    assert.match(r.stdout, /doc\/BEACON\.md/);
+  });
+
+  // 2
+  test('全脏文件在 _proc-use/ → SUGGEST_AUTO_STAGE', () => {
+    const stdin = ' M _proc-use/buginfo/atdo-001.md\n';
+    const r = runWithStdin(dir, stdin, 'check-workspace', '--suggest');
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^SUGGEST_AUTO_STAGE/);
+  });
+
+  // 3
+  test('全脏文件在 .serena/ → SUGGEST_AUTO_STAGE', () => {
+    const stdin = '?? .serena/\n';
+    const r = runWithStdin(dir, stdin, 'check-workspace', '--suggest');
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^SUGGEST_AUTO_STAGE/);
+  });
+
+  // 4
+  test('全脏文件在 .phase-execution/ → SUGGEST_AUTO_STAGE', () => {
+    const stdin = '?? .phase-execution/state.json\n';
+    const r = runWithStdin(dir, stdin, 'check-workspace', '--suggest');
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^SUGGEST_AUTO_STAGE/);
+  });
+
+  // 5
+  test('src/main.js 非豁免 → BLOCK', () => {
+    const stdin = ' M src/main.js\n';
+    const r = runWithStdin(dir, stdin, 'check-workspace', '--suggest');
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^BLOCK/);
+    assert.match(r.stdout, /src\/main\.js/);
+  });
+
+  // 6
+  test('混合（豁免 + 非豁免）→ BLOCK', () => {
+    const stdin = ' M doc/foo.md\n M src/main.js\n';
+    const r = runWithStdin(dir, stdin, 'check-workspace', '--suggest');
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^BLOCK/);
+    assert.match(r.stdout, /src\/main\.js/);
+  });
+
+  // 7
+  test('空输入 → CLEAN', () => {
+    const r = runWithStdin(dir, '', 'check-workspace', '--suggest');
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^CLEAN/);
+  });
+
+  // 8
+  test('未跟踪 ?? doc/foo.md → SUGGEST_AUTO_STAGE', () => {
+    const stdin = '?? doc/foo.md\n';
+    const r = runWithStdin(dir, stdin, 'check-workspace', '--suggest');
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^SUGGEST_AUTO_STAGE/);
+  });
+
+  // 9
+  test('已修改 M doc/foo.md → SUGGEST_AUTO_STAGE', () => {
+    const stdin = ' M doc/foo.md\n';
+    const r = runWithStdin(dir, stdin, 'check-workspace', '--suggest');
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^SUGGEST_AUTO_STAGE/);
+  });
+
+  // 10
+  test('删除 D src/main.js → BLOCK', () => {
+    const stdin = ' D src/main.js\n';
+    const r = runWithStdin(dir, stdin, 'check-workspace', '--suggest');
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^BLOCK/);
+  });
+
+  // 11 e2e
+  test('e2e: atdo Step 0a 流程 → 豁免目录 → 命令返回 SUGGEST → orchestrator 解析', () => {
+    const stdin = ' M doc/PLAN1.md\n M _proc-use/reports/audit.md\n?? .serena/\n?? .phase-execution/state.json\n';
+    const r = runWithStdin(dir, stdin, 'check-workspace', '--suggest');
+    assert.equal(r.code, 0, r.stderr);
+    // 验证 stdout 格式：第一行是 SUGGEST_AUTO_STAGE，后续行是文件清单
+    const lines = r.stdout.split('\n');
+    assert.equal(lines[0], 'SUGGEST_AUTO_STAGE', '第一行应是 SUGGEST_AUTO_STAGE');
+    assert.ok(lines.length >= 5, '应列出 4 个豁免文件');
+  });
+});
