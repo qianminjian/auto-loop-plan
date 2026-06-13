@@ -128,16 +128,9 @@ node _proc-use/reports/atdo.test.js
 
 ## 推送到 GitHub
 
-`_proc-use/` 进 git **本地跟踪**（buginfo / dev / reports 全量历史保留），但**不对外推送**。push GitHub 用专门脚本剥离 `_proc-use/`：
+直接 `git push origin main` 即可。`_proc-use/`（buginfo/dev/reports）随仓库一同推送 GitHub。
 
-```bash
-bash scripts/push-public.sh                # 默认: origin main，自动剥离 _proc-use/
-bash scripts/push-public.sh origin develop # 自定义 remote / branch
-```
-
-脚本机制：从当前 main 创建临时分支 → `git rm --cached _proc-use/` → amend commit → push 临时分支到目标 → 切回 main 删临时分支。本地 `_proc-use/` 物理文件**不删**。
-
-> ⚠️ **不要直接 `git push` 到对外 remote**——会带 `_proc-use/`（过程文档）。仅 `bash scripts/push-public.sh` 安全。
+> 历史说明：曾尝试用 `scripts/push-public.sh` 剥离 _proc-use/（amend 模式），但每次 push 后产生历史分叉，第二次起需 `--force-with-lease`。已废弃此方案，恢复为直接 push。
 
 
 ## 生产故障修复记录 (v2.0.1 — 2026-06-12)

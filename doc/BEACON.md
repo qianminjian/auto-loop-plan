@@ -19,6 +19,7 @@
 | D4 | atomic write + 4 级 backup fallback（state.json） | kill -9 不损坏状态 + 历史 3 版本回溯 | v2.0.x |
 | D5 | proxy-recovery-decision 命令强制 evidence | Bug-05 合规口子是 orchestrator-direct real validation，非 agent 自报告 | Plan 1 (2026-06-13) |
 | D6 | 设计文档统一到根目录 `doc/`，纳入 git | 消除 `_proc-use/design/` 与 `_proc-use/docs/` 重叠；让 BEACON/DESIGN/PLAN 对外可见 | Plan 1 (2026-06-13) |
+| D7 | 撤销 push-public.sh，直接 git push（_proc-use/ 全推 GitHub） | amend 模式每次 push 产生历史分叉，第二次需 force-with-lease（红线 4）；与其反复折腾不如让 _proc-use/ 也推 GitHub | Plan 1 (2026-06-13) |
 
 ## 当前状态
 **阶段：** Plan 1 实施中（基础设施 + atdo-003 P1）
@@ -29,6 +30,7 @@
 ## 设计演进日志
 | 日期 | 变更 | 原因 |
 |------|------|------|
+| 2026-06-13 | D7：撤销 push-public.sh，直接 git push | amend 模式每次 push 产生历史分叉，方案 c：让 _proc-use/ 也推 GitHub |
 | 2026-06-13 | 设计文档统一到根目录 `doc/`（含 BEACON/DESIGN/PLAN/archive） | 用户决策，消除 `_proc-use/design/` 与 `_proc-use/docs/` 双目录重叠 |
 | 2026-06-13 | Plan 1 拆分（原 17-20 commits → 6 commits） | 审计 finding F14，降低单 plan 风险 |
 | 2026-06-13 | proxy-recovery 命令强制 --evidence 参数 | 审计 finding F1，防 agent 自报告绕过 Bug-05 |
