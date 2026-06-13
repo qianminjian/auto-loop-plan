@@ -3301,10 +3301,9 @@ describe('v2.0.x P2/P3 微修复', () => {
   });
 
   describe('P3-4: README 引用设计文档', () => {
-    // P3-4: _proc-use/docs/DESIGN.md 与 _proc-use/docs/README.md 未被 README 引用
-    //   用户难以发现架构设计沉淀
-    // 修复:README 末尾加"📚 设计文档"小节,链接到 _proc-use/docs/README.md 和 DESIGN.md
-    // 测试:grep README 验证两个链接都在
+    // P3-4: 设计文档须被 README 引用,用户能发现架构设计沉淀
+    // D6 决策(2026-06-13):设计文档统一到根目录 doc/(纳入 git);_proc-use/docs/ 已废弃
+    // 修复:README "📚 设计文档"小节,链接到 doc/ 下文档
 
     test('README 末尾有"📚 设计文档"小节', () => {
       const readmePath = path.join(__dirname, '..', '..', 'README.md');
@@ -3313,27 +3312,27 @@ describe('v2.0.x P2/P3 微修复', () => {
         'README 末尾应有"📚 设计文档"小节');
     });
 
-    test('README 链接到 _proc-use/docs/README.md', () => {
+    test('README 链接到 doc/BEACON.md（项目设计明灯）', () => {
       const readmePath = path.join(__dirname, '..', '..', 'README.md');
       const content = fs.readFileSync(readmePath, 'utf8');
-      assert.match(content, /_proc-use\/docs\/README\.md/,
-        'README 应链接到 _proc-use/docs/README.md');
+      assert.match(content, /doc\/BEACON\.md/,
+        'README 应链接到 doc/BEACON.md（D6 决策后的设计明灯路径）');
     });
 
-    test('README 链接到 _proc-use/docs/DESIGN.md', () => {
+    test('README 链接到 doc/DESIGN.md', () => {
       const readmePath = path.join(__dirname, '..', '..', 'README.md');
       const content = fs.readFileSync(readmePath, 'utf8');
-      assert.match(content, /_proc-use\/docs\/DESIGN\.md/,
-        'README 应链接到 _proc-use/docs/DESIGN.md');
+      assert.match(content, /doc\/DESIGN\.md/,
+        'README 应链接到 doc/DESIGN.md（D6 决策后路径）');
     });
 
-    test('_proc-use/docs/ 实际存在 README.md 和 DESIGN.md 文件', () => {
+    test('doc/ 实际存在 BEACON.md 和 DESIGN.md 文件', () => {
       // 引用必须指向真实文件,不能 dead link
-      const docsDir = path.join(__dirname, '..', '..', '_proc-use', 'docs');
-      assert.ok(fs.existsSync(path.join(docsDir, 'README.md')),
-        '_proc-use/docs/README.md 应存在');
-      assert.ok(fs.existsSync(path.join(docsDir, 'DESIGN.md')),
-        '_proc-use/docs/DESIGN.md 应存在');
+      const docDir = path.join(__dirname, '..', '..', 'doc');
+      assert.ok(fs.existsSync(path.join(docDir, 'BEACON.md')),
+        'doc/BEACON.md 应存在');
+      assert.ok(fs.existsSync(path.join(docDir, 'DESIGN.md')),
+        'doc/DESIGN.md 应存在');
     });
   });
 
