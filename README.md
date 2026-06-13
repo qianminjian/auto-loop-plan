@@ -167,6 +167,7 @@ node _proc-use/reports/atdo.test.js
 | `validate-summary <phaseId>` | 校验 summary.md 长度(≤500 chars) |
 | `generate-summary-template <phaseId>` | 输出 summary.md 统一模板 |
 | `proxy-recovery-decision <phaseId> <verdict> [--evidence=<path>] [--reason=...]` | atdo-003：proxy 报告恢复决策（auto-pass 需 evidence 5 维全 PASS / manual-required 升 manual gate）|
+| `check-workspace --suggest` (stdin: git status --porcelain) | atdo-001：智能识别豁免目录脏文件（doc/ _proc-use/ .serena/ .phase-execution/），输出 CLEAN / SUGGEST_AUTO_STAGE / BLOCK |
 | `compare-plan-hash <plan-file>` | 检测 plan 文件漂移 |
 | `lock` | 获取并发锁 |
 | `unlock --reason=<r>` | 释放锁(必须带原因) |
