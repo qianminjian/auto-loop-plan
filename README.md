@@ -132,6 +132,31 @@ node _proc-use/reports/atdo.test.js
 
 > 历史说明：曾尝试用 `scripts/push-public.sh` 剥离 _proc-use/（amend 模式），但每次 push 后产生历史分叉，第二次起需 `--force-with-lease`。已废弃此方案，恢复为直接 push。
 
+## 可选：pre-commit hook
+
+启用：`git config core.hooksPath .githooks`
+
+内容：commit 前自动跑 `node _proc-use/reports/atdo.test.js` + `markdownlint-cli2 README.md SKILL.md doc/*.md`。失败拒绝 commit，成功静默通过。
+
+禁用：`git config --unset core.hooksPath`
+
+**不强制启用**（项目策略：不修改用户 git 配置）。CI 上的 5 个 job 已经覆盖相同检查。
+
+## 可选：本地 pre-commit hook
+
+启用：
+```bash
+git config core.hooksPath .githooks
+```
+内容：每次 commit 前自动跑 `node atdo.test.js` + `markdownlint README.md SKILL.md doc/*.md`，任一失败拒绝 commit。
+
+禁用：
+```bash
+git config --unset core.hooksPath
+```
+
+> 不强制启用（按全局 safety-bounds：不自动修改用户 git 配置）。
+
 
 ## 生产故障修复记录 (v2.0.1 — 2026-06-12)
 
