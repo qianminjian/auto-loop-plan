@@ -1327,6 +1327,111 @@ function cmdGenerateSummaryTemplate() {
   process.stdout.write(template);
 }
 
+// ─── atdo-003 P1: proxy-recovery-decision ─────────────────
+// 命令: proxy-recovery-decision <phaseId> <verdict> [--evidence=<path>] [--reason=<r>]
+//   verdict ∈ {auto-pass, manual-required}
+//   F1 [P0] 强约束: auto-pass 必须带 --evidence 文件，5 维全 PASS
+//     防 LLM agent 偷懒触发 "agent 自报告 auto-pass" 违反 Bug-05 协议
+//     auto-pass 的合规判据：orchestrator 直跑 5 维独立验证生成 evidence,
+//     而非依赖 agent 自报告的 methodology=proxy + SUCCESS
+//   manual-required 不需 evidence (升 manual gate)
+//   reason ≤ 200 chars
+//   幂等: 同 phase 同 verdict 重复调用 → exit 0 不重复写 (at 字段不变)
+const PROXY_VERDICTS = ['auto-pass', 'manual-required'];
+const REQUIRED_EVIDENCE_DIMENSIONS = ['fileExistence', 'syntax', 'diffRange', 'debugResidue', 'secretScan'];
+const PROXY_REASON_MAX_CHARS = 200;
+
+function cmdProxyRecoveryDecision() {
+  const phaseId = args[0];
+  const verdict = args[1];
+  if (!phaseId) die('proxy-recovery-decision 需要 phaseId 作为第一个参数');
+  if (!verdict) die(`proxy-recovery-decision 需要 verdict 作为第二个参数，合法 verdict: ${PROXY_VERDICTS.join(' | ')}`);
+  if (!PROXY_VERDICTS.includes(verdict)) {
+    die(`proxy-recovery-decision: 无效 verdict "${verdict}"，合法 verdict: ${PROXY_VERDICTS.join(' | ')}`);
+  }
+
+  // 解析 --evidence=<path> / --reason=<r>（与 cmdUnlock 相同的正则模式）
+  let evidencePath = null;
+  let reason = '';
+  for (const a of args.slice(2)) {
+    const mE = a.match(/^--evidence(?:=(.+))?$/);
+    if (mE) {
+      if (!mE[1]) die('proxy-recovery-decision: --evidence 必须有值（路径）');
+      evidencePath = mE[1];
+      continue;
+    }
+    const mR = a.match(/^--reason(?:=(.*))?$/);
+    if (mR) {
+      reason = mR[1] || '';
+      continue;
+    }
+  }
+
+  if (reason.length > PROXY_REASON_MAX_CHARS) {
+    die(`proxy-recovery-decision: reason 长度 ${reason.length} 超 ${PROXY_REASON_MAX_CHARS} chars`);
+  }
+
+  // F1 核心: auto-pass 必须带 evidence 且 5 维全 PASS
+  if (verdict === 'auto-pass') {
+    if (!evidencePath) {
+      die(`proxy-recovery-decision: verdict=auto-pass 必须带 --evidence=<path>
+原因（F1 [P0]）：防 LLM agent 偷懒触发 "agent 自报告 auto-pass" 违反 Bug-05 协议
+auto-pass 合规判据：orchestrator 直跑 5 维验证（fileExistence/syntax/diffRange/debugResidue/secretScan）
+            生成 evidence.json，所有维度必须 PASS，命令二次校验`);
+    }
+    if (!fs.existsSync(evidencePath)) {
+      die(`proxy-recovery-decision: evidence 文件不存在: ${evidencePath}`);
+    }
+    let evidence;
+    try {
+      const content = fs.readFileSync(evidencePath, 'utf8');
+      evidence = JSON.parse(content);
+    } catch (e) {
+      die(`proxy-recovery-decision: evidence 文件非合法 JSON: ${e.message}`);
+    }
+    for (const dim of REQUIRED_EVIDENCE_DIMENSIONS) {
+      if (evidence[dim] === undefined) {
+        die(`proxy-recovery-decision: evidence 缺 ${dim} 维度（必需 5 维：${REQUIRED_EVIDENCE_DIMENSIONS.join(', ')}）`);
+      }
+      if (evidence[dim] !== 'PASS') {
+        die(`proxy-recovery-decision: evidence.${dim} 必须为 "PASS"，当前 "${evidence[dim]}"`);
+      }
+    }
+  }
+
+  // 读 state，定位 phase
+  const state = readState();
+  const phase = state.phases.find(p => p.number === phaseId);
+  if (!phase) die(`phase ${phaseId} 不存在`);
+
+  // 幂等：同 verdict 重复调用 → exit 0，at 不变
+  if (phase.proxyRecovery && phase.proxyRecovery.verdict === verdict) {
+    process.stdout.write(JSON.stringify({
+      ok: true,
+      idempotent: true,
+      phaseId,
+      verdict,
+      at: phase.proxyRecovery.at,
+    }));
+    return;
+  }
+
+  // 写入 proxyRecovery
+  phase.proxyRecovery = {
+    at: new Date().toISOString(),
+    verdict,
+    reason,
+    evidence: evidencePath,
+  };
+  writeState(state);
+  process.stdout.write(JSON.stringify({
+    ok: true,
+    phaseId,
+    verdict,
+    at: phase.proxyRecovery.at,
+  }));
+}
+
 // ─── 入口 ────────────────────────────────────────────────
 
 const commands = {
@@ -1341,6 +1446,7 @@ const commands = {
   'has-confirm': cmdHasConfirm,        // Bug-07
   'validate-summary': cmdValidateSummary,  // Bug-10
   'generate-summary-template': cmdGenerateSummaryTemplate,  // P3-4
+  'proxy-recovery-decision': cmdProxyRecoveryDecision,  // atdo-003 P1
   'compare-plan-hash': cmdComparePlanHash,  // Bug-09 / P2-17
   lock: () => { process.stdout.write(JSON.stringify(acquireLock())); },
   unlock: cmdUnlock,

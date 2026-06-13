@@ -911,6 +911,115 @@ node scripts/phase-state.js record-commit <phaseId> <hash[,hash,...]>
 - other errors → ALERT.md + exit
 - agent 内部 commit 失败 → 在 agent prompt 中给出 `[AUTO-EXEC-RESULT: status=FAILED]`,由 orchestrator 触发 fix loop
 
+### Proxy Recovery Protocol (atdo-003)
+
+> **背景**(F1 [P0]):Bug-05 规定 `methodology=proxy` 报告不得通过 gate,但**没定义 orchestrator 的标准恢复操作序列**。每次靠即兴判断 → orchestrator 容易偷懒"agent 报告 SUCCESS 就放过"违反 Bug-05 协议。
+>
+> **本章节**:定义 orchestrator 检测到 proxy 报告时的标准操作序列,固化为命令 `proxy-recovery-decision`。
+
+#### 触发条件
+检测到 `[AUTO-EXEC-RESULT: ... methodology=proxy ...]`
+
+#### 标准操作序列(orchestrator 必须执行,agent 永不可触发 auto-pass)
+
+##### Step 1. 跑 5 维独立验证
+
+orchestrator 直接执行(不委托 agent):
+1. **fileExistence**: `test -f <产出物路径>` 逐一
+2. **syntax**: 项目编译器 `node -c` / `tsc --noEmit` / `bash -n`
+3. **diffRange**: `git diff --stat HEAD~1` 变更量 0 < x < 10000
+4. **debugResidue**: `grep -E 'console\.log|TODO|debugger'` 在变更文件
+5. **secretScan**: `node scripts/phase-state.js sanitize <每个变更文件>`
+
+##### Step 2. 生成 evidence.json
+
+写到 `.phase-execution/phases/<id>/proxy-evidence.json`:
+
+```json
+{
+  "fileExistence": "PASS",
+  "syntax": "PASS",
+  "diffRange": "PASS",
+  "debugResidue": "PASS",
+  "secretScan": "PASS"
+}
+```
+
+**任一维度 FAIL → 不写 evidence,跳到 Step 3b**。
+
+##### Step 3a. 5 维全 PASS → 调命令 auto-pass
+
+```bash
+node scripts/phase-state.js proxy-recovery-decision <id> auto-pass \
+  --evidence=.phase-execution/phases/<id>/proxy-evidence.json \
+  --reason="<proxy 类型分类,如 bash-mock-fixture / tdd-red-fixture>"
+```
+
+命令自身**二次校验** evidence 文件完整性(防 LLM 凭空构造)。phase 推进。
+
+##### Step 3b. 任一 FAIL → 升 manual gate
+
+```bash
+node scripts/phase-state.js proxy-recovery-decision <id> manual-required \
+  --reason="<具体 FAIL 维度,如 syntax-error / secret-leak>"
+```
+
+后续由 §Manual Gate Protocol 接管(set-phase awaiting_user_review)。
+
+#### 协议硬约束
+
+- **agent 自报告 SUCCESS 永不可触发 auto-pass** —— 必须由 orchestrator 提交 evidence 文件支撑
+- **evidence 5 维必须全 PASS** —— 任一缺失或非 PASS → die
+- **auto-pass 适用范围**: bash 单测 mock / TDD red fixture 等"安全 fixture 类型" proxy
+- **auto-pass 不适用**: 端到端流程模拟(如 `sleep 0.05s` 模拟 AI 推理)、状态机模拟等"行为伪造类" proxy
+- **幂等**: 同 phase 同 verdict 重复调用 → exit 0 不重复写(at 字段保持第一次值)
+
+#### state.json schema 扩展
+
+```jsonc
+{
+  "phases": [
+    {
+      "number": "02",
+      "proxyRecovery": {           // ← 可选,proxy-recovery-decision 命令调用时写入
+        "at": "2026-06-13T12:00:00Z",
+        "verdict": "auto-pass",     // auto-pass | manual-required
+        "reason": "bash-mock-fixture",
+        "evidence": ".phase-execution/phases/02/proxy-evidence.json"  // manual-required 时为 null
+      }
+    }
+  ]
+}
+```
+
+#### 反例 vs 正例
+
+```bash
+# ❌ 反例 1:agent 报告 methodology=proxy + SUCCESS,orchestrator 直接放过
+# 违反 Bug-05 协议;agent 自报告不可信
+
+# ❌ 反例 2:orchestrator 跑了 5 维但不生成 evidence 文件,直接命令 auto-pass
+node scripts/phase-state.js proxy-recovery-decision 02 auto-pass
+# → die: verdict=auto-pass 必须带 --evidence
+
+# ❌ 反例 3:evidence 文件只含 4 维(漏 secretScan)
+# → die: evidence 缺 secretScan 维度
+
+# ❌ 反例 4:evidence 文件 syntax 维度为 FAIL
+# → die: evidence.syntax 必须为 "PASS"
+
+# ✅ 正例:orchestrator 跑 5 维全 PASS,生成 evidence,命令 auto-pass
+node scripts/phase-state.js proxy-recovery-decision 02 auto-pass \
+  --evidence=.phase-execution/phases/02/proxy-evidence.json \
+  --reason=bash-mock-fixture
+# → exit 0, state.phases[1].proxyRecovery 写入
+
+# ✅ 正例:任一维度 FAIL → 升 manual gate
+node scripts/phase-state.js proxy-recovery-decision 02 manual-required \
+  --reason=syntax-error-in-3-files
+# → exit 0, orchestrator 接着调 set-phase 02 awaiting_user_review
+```
+
 ### Manual Gate Protocol (Bug-06)
 
 > **背景**:Gate 3 等场景是"人工对比多篇资产"——这是**用户判断**,agent 不可代理。
