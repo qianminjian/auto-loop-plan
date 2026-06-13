@@ -1432,6 +1432,70 @@ auto-pass 合规判据：orchestrator 直跑 5 维验证（fileExistence/syntax/
   }));
 }
 
+// ─── atdo-001 P2: check-workspace --suggest ─────────────────
+// 命令: check-workspace --suggest
+//   stdin: git status --porcelain 输出（XY <filename>，?? <filename> 等）
+//   stdout 决策:
+//     CLEAN                            (空输入 = 工作区干净)
+//     SUGGEST_AUTO_STAGE\n<files>      (全部脏文件在豁免目录)
+//     BLOCK: <non-exempt-files>        (任一非豁免脏文件)
+//   豁免目录列表（F4 YAGNI：硬编码，未来可扩展为 config）
+const WORKSPACE_EXEMPT_PATHS = [
+  '.phase-execution/',  // atdo 运行时
+  'doc/',                // D6 设计文档目录
+  '_proc-use/',          // D7 过程文档目录
+  '.serena/',            // Serena MCP 副产物（PLAN1 撞过的真实场景）
+];
+
+function cmdCheckWorkspace() {
+  if (!args.includes('--suggest')) {
+    die('check-workspace 当前仅支持 --suggest 模式');
+  }
+  // 读 stdin（git status --porcelain 输出）
+  let stdin = '';
+  try {
+    stdin = fs.readFileSync(0, 'utf8');
+  } catch (e) {
+    die(`check-workspace: 读取 stdin 失败: ${e.message}`);
+  }
+
+  const lines = stdin.split('\n').filter(l => l.length > 0);
+  if (lines.length === 0) {
+    process.stdout.write('CLEAN');
+    return;
+  }
+
+  // 解析 git status --porcelain 输出
+  // 格式: 'XY filename' (X=index, Y=worktree, 2 字符 + 1 空格)
+  //   或: '?? filename' (untracked)
+  // 文件路径从位置 3 开始
+  const exempt = [];
+  const nonExempt = [];
+  for (const line of lines) {
+    const filepath = line.substring(3).trim();
+    if (!filepath) continue;
+    // rename 格式: 'R  oldname -> newname'，取 newname
+    let actualPath = filepath;
+    if (filepath.includes(' -> ')) {
+      actualPath = filepath.split(' -> ')[1].trim();
+    }
+    const isExempt = WORKSPACE_EXEMPT_PATHS.some(prefix =>
+      actualPath.startsWith(prefix)
+    );
+    if (isExempt) {
+      exempt.push(actualPath);
+    } else {
+      nonExempt.push(actualPath);
+    }
+  }
+
+  if (nonExempt.length > 0) {
+    process.stdout.write(`BLOCK: ${nonExempt.join(', ')}`);
+  } else {
+    process.stdout.write(`SUGGEST_AUTO_STAGE\n${exempt.join('\n')}`);
+  }
+}
+
 // ─── 入口 ────────────────────────────────────────────────
 
 const commands = {
@@ -1447,6 +1511,7 @@ const commands = {
   'validate-summary': cmdValidateSummary,  // Bug-10
   'generate-summary-template': cmdGenerateSummaryTemplate,  // P3-4
   'proxy-recovery-decision': cmdProxyRecoveryDecision,  // atdo-003 P1
+  'check-workspace': cmdCheckWorkspace,  // atdo-001 P2
   'compare-plan-hash': cmdComparePlanHash,  // Bug-09 / P2-17
   lock: () => { process.stdout.write(JSON.stringify(acquireLock())); },
   unlock: cmdUnlock,

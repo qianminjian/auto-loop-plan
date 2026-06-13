@@ -249,23 +249,34 @@ The orchestrator MUST re-inject this block into EVERY agent spawn prompt
 Run directly (no Agent delegation):
 ```bash
 # 0a. Check workspace cleanliness (skip if --force-dirty)
-# 约定:用户项目必须把 `.phase-execution/` 加入项目 .gitignore
-#      (atdo 运行时自动生成的状态/报告目录,不应纳入版本控制)
-#      过滤规则只放行 `?? .phase-execution/`(未跟踪)——若用户曾 `git add -f` 强提交,会变成 `M ` 状态,需先 `git rm --cached`
+# atdo-001 修复:用 check-workspace --suggest 智能识别豁免目录
+#   豁免目录: .phase-execution/ (atdo 运行时) / doc/ (D6 设计文档) / _proc-use/ (D7 过程文档) / .serena/ (Serena MCP 副产物)
+#   全脏文件在豁免目录 → SUGGEST_AUTO_STAGE → checkpoint 提示
+#   任一非豁免脏文件 → BLOCK → FATAL exit
 if [ "$FORCE_DIRTY" != "true" ]; then
-  DIRTY=$(git status --porcelain | grep -v -E '^\?\? \.phase-execution/' || true)
-  if [ -n "$DIRTY" ]; then
-    echo "[FATAL] 工作区不干净，atdo 协议要求除 .phase-execution/ 外无任何未提交改动"
-    echo ""
-    echo "当前脏文件："
-    echo "$DIRTY" | sed 's/^/  /'
-    echo ""
-    echo "修复方法（任选其一）："
-    echo "  1. 提交: git add <files> && git commit -m 'WIP: 准备 atdo 执行'"
-    echo "  2. 暂存: git stash push -u -m 'WIP before atdo'"
-    echo "  3. 强制执行: 重启时使用 --force-dirty 标志（atdo 会忽略脏工作区，但后续 diff 判断会失效）"
-    exit 1
-  fi
+  DIRTY=$(git status --porcelain)
+  RESULT=$(echo "$DIRTY" | node scripts/phase-state.js check-workspace --suggest)
+  case "$RESULT" in
+    CLEAN*)
+      ;;
+    SUGGEST_AUTO_STAGE*)
+      echo "[INFO] 检测到豁免目录文件未提交（doc/ _proc-use/ .serena/ .phase-execution/）:"
+      echo "$RESULT" | tail -n +2 | sed 's/^/  /'
+      echo ""
+      echo "建议先 git add+commit 这些文件再启动 atdo，或在 checkpoint 选择继续"
+      # 走 phase-scoped checkpoint 流程，用户可继续/跳过/终止
+      ;;
+    BLOCK*)
+      echo "[FATAL] $RESULT"
+      echo ""
+      echo "atdo 协议要求除豁免目录外无任何未提交改动"
+      echo "修复方法（任选其一）："
+      echo "  1. 提交: git add <files> && git commit -m 'WIP: 准备 atdo 执行'"
+      echo "  2. 暂存: git stash push -u -m 'WIP before atdo'"
+      echo "  3. 强制执行: 重启时使用 --force-dirty 标志（atdo 会忽略脏工作区，但后续 diff 判断会失效）"
+      exit 1
+      ;;
+  esac
 else
   echo "[WARN] --force-dirty 模式：跳过工作区干净性检查，diff 判断可能失准"
 fi
