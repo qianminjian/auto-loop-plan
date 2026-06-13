@@ -74,26 +74,79 @@
 
 **Commit**: 单个原子 commit（含上述 6 个动作）
 
-### A2 `chore(git): atdo.test.js 重新加入 git 追踪（撤销 6dedf88 决策）`
+### A2 `chore(git): _proc-use/ 恢复 git 跟踪 + push GitHub 排除机制`
 
-**前置**：用户已批准撤销 commit 6dedf88 的取消追踪决策（F2 裁决）
+**前置决策**（用户裁决）：撤销之前在 .gitignore 复杂例外上的折腾，**简化为**：
+- `_proc-use/` 整体进 git 本地跟踪（撤销 commit 6dedf88）
+- push GitHub 时由专门脚本 `scripts/push-public.sh` 剥离
+- 不重写历史：6dedf88 保留，新 commit 通过 .gitignore + add 撤销其逻辑效果
 
-**动作**：
-1. 修改 `.gitignore`：在 `_proc-use/` 排除之后加例外
-   ```gitignore
-   # ── 过程材料（不纳入 git）──
-   _proc-use/
+**为什么简化**：原 A2 方案设计复杂 4 行例外（`_proc-use/*` + `!_proc-use/reports/` + `_proc-use/reports/*` + `!atdo.test.js`），易踩坑（A1 已踩过一次），且只放单文件进 git 是本末倒置——更好的做法是 _proc-use/ 全跟踪 + push 时剥离。
 
-   # ── 例外：atdo.test.js 必须进 git（CI 需要） ──
-   !_proc-use/reports/
-   _proc-use/reports/*
-   !_proc-use/reports/atdo.test.js
-   ```
-2. `git add _proc-use/reports/atdo.test.js`
-3. README.md "测试状态" 章节加注：
-   > 注：`atdo.test.js` 是 `_proc-use/` 中唯一进 git 的文件（CI 工作流需要）。其他 `_proc-use/` 内容仍按 gitignore 保持本地。
+**动作**（4 步）：
 
-**Commit**: 单个原子 commit
+#### 1. 修改 `.gitignore`：去掉 `_proc-use/` 整体排除
+```gitignore
+# ── 过程材料：本地 git 跟踪（push GitHub 时由专门机制排除）──
+#   _proc-use/buginfo/  Bug 报告
+#   _proc-use/dev/      安装/卸载脚本
+#   _proc-use/reports/  审计/测试报告（含 atdo.test.js）
+#   注：_proc-use/ 进 git 历史记录完整保留；推 GitHub 由独立 push 脚本/hook 剥离
+#   注：项目设计文档统一在根目录 doc/（结果性文档，对外可见）
+```
+
+#### 2. 创建 `scripts/push-public.sh`（A=方案1：临时分支模式）
+脚本逻辑：
+- 前置检查：当前在 main / 工作区干净 / remote 存在
+- 创建临时分支 `public-push-<ts>` from main
+- `git rm -rf --cached _proc-use/` 剥离 index
+- `git commit --amend` 加 release 标记
+- `git push <remote> <temp>:<branch>` 推目标分支
+- 切回 main + 删临时分支 + ERR trap 确保异常恢复
+- 本地 _proc-use/ 物理文件不动
+
+#### 3. `git add` _proc-use/ 全部 + 脚本 + .gitignore + README
+```bash
+git add .gitignore _proc-use/buginfo/ _proc-use/dev/ _proc-use/reports/ scripts/push-public.sh README.md doc/PLAN1-infra-atdo003.md
+```
+
+#### 4. README 测试章节加 push 约定
+在 `## 测试状态` 章节后加：
+```markdown
+## 推送到 GitHub
+
+`_proc-use/` 进 git 本地跟踪但不对外。推 GitHub 用专门脚本剥离 _proc-use/：
+\`\`\`bash
+bash scripts/push-public.sh                # push origin main，剥离 _proc-use/
+bash scripts/push-public.sh origin develop # 自定义 remote/branch
+\`\`\`
+直接 `git push` 会带 _proc-use/，**不要直接 push 到对外 remote**。
+```
+
+**Commit message**：
+```
+chore(git): _proc-use/ 恢复 git 跟踪 + push GitHub 排除机制
+
+- .gitignore 去掉 _proc-use/ 整体排除（撤销 6dedf88，不重写历史）
+- _proc-use/ 14 文件进 git：buginfo (4) + dev (2) + reports (8 含 atdo.test.js)
+- 新增 scripts/push-public.sh：push 时用临时分支剥离 _proc-use/
+- README 加 push 约定（直接 git push 会带 _proc-use/，必须用脚本）
+- 撤销原 A2 复杂 gitignore 例外方案（不再本末倒置）
+
+仓库影响：本地 git +356K（_proc-use/ 全跟踪）；GitHub 通过 push 脚本剥离
+原因（用户裁决）：避免在 .gitignore 上反复折腾，简化为常规追踪 + push 隔离
+```
+
+**验证**：
+- `git ls-files _proc-use/ | wc -l` → 14
+- `bash scripts/push-public.sh --help` → 显示用法（脚本可执行）
+- `git status --porcelain | grep -v .serena` → 空
+
+**不做**：
+- ❌ 不 git revert / reset / rebase 6dedf88（历史完整保留）
+- ❌ 不实现 pre-push hook（推迟到 Plan 2 / 出现误推时再加）
+- ❌ 不动 atdo.test.js 内容（仅恢复跟踪）
+
 
 ### A3 `ci: GitHub Actions 骨架（test + markdown-lint）— hard gate`
 

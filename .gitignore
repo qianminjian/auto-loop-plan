@@ -2,12 +2,13 @@
 # 真实源码在开发目录本身（SKILL.md / scripts/ / references/），
 # install.sh 部署到 ~/.agents/skills/atdo/，不在此目录
 
-# ── 过程材料（不纳入 git）──
-#   _proc-use/dev/      安装/卸载脚本（开发过程调试用）
-#   _proc-use/reports/  运行时审计/测试报告（每次执行产生）
-#   _proc-use/buginfo/  Bug 报告（过程性）
-#   注：项目设计文档已统一到根目录 doc/（git 跟踪），_proc-use/ 仅保留过程性产物
-_proc-use/
+# ── 过程材料：本地 git 跟踪（push GitHub 时由专门机制排除）──
+#   _proc-use/buginfo/  Bug 报告
+#   _proc-use/dev/      安装/卸载脚本
+#   _proc-use/reports/  审计/测试报告（含 atdo.test.js）
+#   注：_proc-use/ 进 git 历史记录完整保留；推 GitHub 由独立 push 脚本/hook 剥离
+#   注：项目设计文档统一在根目录 doc/（结果性文档，对外可见）
+# （此处原 `_proc-use/` 已移除，恢复 git 跟踪）
 
 # ── atdo 运行时状态（防御性:本仓库不应产生,但 user 可能误用) ──
 .phase-execution/

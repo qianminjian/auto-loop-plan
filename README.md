@@ -124,6 +124,20 @@ node _proc-use/reports/atdo.test.js
 
 覆盖:init / get / set-phase / get-current-phase / inc-strike / get-strikes / record-commit / record-confirm / has-confirm / validate-summary / generate-summary-template / compare-plan-hash / lock / unlock / check-disk / check-lock-age / sanitize / heartbeat / summary / backup rotation / E2E 完整流程 + P1-2(record-commit HEAD 解析)+ P1-4(verification phase type)+ 9 个安全注入回归(路径穿越、命令注入、LLM 幻觉、敏感文件检测、P2 6 项加固)+ v2.0.x P2/P3 微修复(parseDfOutput / writeState 备份 / watchdog 守护 / 模板字段 / inc-strike ALERT 触发)+ B-01(get-current-phase phaseType) + B-02(set-phase verified 守卫)。
 
+## 推送到 GitHub
+
+`_proc-use/` 进 git **本地跟踪**（buginfo / dev / reports 全量历史保留），但**不对外推送**。push GitHub 用专门脚本剥离 `_proc-use/`：
+
+```bash
+bash scripts/push-public.sh                # 默认: origin main，自动剥离 _proc-use/
+bash scripts/push-public.sh origin develop # 自定义 remote / branch
+```
+
+脚本机制：从当前 main 创建临时分支 → `git rm --cached _proc-use/` → amend commit → push 临时分支到目标 → 切回 main 删临时分支。本地 `_proc-use/` 物理文件**不删**。
+
+> ⚠️ **不要直接 `git push` 到对外 remote**——会带 `_proc-use/`（过程文档）。仅 `bash scripts/push-public.sh` 安全。
+
+
 ## 生产故障修复记录 (v2.0.1 — 2026-06-12)
 
 基于 7 阶段全量生产运行采集的 13 个问题修复：
