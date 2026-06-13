@@ -1,0 +1,23 @@
+# atdo 项目（GitHub-friendly 版本，由 scripts/push-public.sh 自动注入）
+# 真实源码在开发目录本身（SKILL.md / scripts/ / references/），
+# install.sh 部署到 ~/.agents/skills/atdo/，不在此目录
+
+# ── 过程材料（不纳入 git）──
+# 本地开发版 .gitignore 允许 _proc-use/ 进 git（含 buginfo/dev/reports 完整历史）
+# push 时由 scripts/push-public.sh 切到此 GitHub-friendly 版本（_proc-use/ 不进 git）
+_proc-use/
+
+# ── atdo 运行时状态 ──
+.phase-execution/
+
+# ── 系统文件 ──
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# ── 临时文件 ──
+*.tmp
+*.log
+*~

@@ -60,6 +60,18 @@ else
   echo "[push-public] _proc-use/ 不在 git 索引中，跳过剥离"
 fi
 
+# 2b. 替换 .gitignore 为 GitHub-friendly 版本（让 _proc-use/ 在 GitHub 上显示为 ignored）
+# 解决一致性 bug：剥离 _proc-use/ 文件后，.gitignore 也必须改为不允许 _proc-use/
+# 否则 clone 用户看到"应允许跟踪但仓库为空"的矛盾
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ ! -f "$SCRIPT_DIR/.gitignore.public" ]; then
+  echo "[push-public] ❌ 未找到 $SCRIPT_DIR/.gitignore.public 模板"
+  exit 1
+fi
+cp "$SCRIPT_DIR/.gitignore.public" .gitignore
+git add .gitignore
+echo "[push-public] .gitignore 替换为 GitHub-friendly 版本（_proc-use/ ignored）"
+
 # 3. amend commit（保留原 message + Co-Authored-By，加 release 标记）
 ORIG_MSG=$(git log -1 --pretty=%B)
 git commit --amend -m "$ORIG_MSG" -m "[push-public] _proc-use/ stripped for GitHub" > /dev/null
