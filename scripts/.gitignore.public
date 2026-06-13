@@ -5,7 +5,12 @@
 # ── 过程材料（不纳入 git）──
 # 本地开发版 .gitignore 允许 _proc-use/ 进 git（含 buginfo/dev/reports 完整历史）
 # push 时由 scripts/push-public.sh 切到此 GitHub-friendly 版本（_proc-use/ 不进 git）
-_proc-use/
+_proc-use/*
+
+# ── 例外：atdo.test.js 必须进 git（CI 工作流需要测试文件） ──
+!_proc-use/reports/
+_proc-use/reports/*
+!_proc-use/reports/atdo.test.js
 
 # ── atdo 运行时状态 ──
 .phase-execution/

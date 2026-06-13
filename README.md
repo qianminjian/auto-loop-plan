@@ -1,5 +1,7 @@
 # atdo
 
+[![CI](https://github.com/qianminjian/auto-loop-plan/actions/workflows/ci.yml/badge.svg)](https://github.com/qianminjian/auto-loop-plan/actions/workflows/ci.yml)
+
 > Claude Code Skill · 全自动分阶段项目编排器(v2.0)
 
 按任意格式的项目计划,**单 turn 单阶段**串行执行。每阶段自动:执行 → 独立验证 → 审计 → 修复(≤3 次)→ 关口集成测试 → commit。失败累积触发 3-strike 告警退出。

@@ -51,11 +51,13 @@ echo "[push-public] 临时分支: $TEMP_BRANCH"
 git checkout -b "$TEMP_BRANCH" > /dev/null
 trap 'echo "[push-public] ⚠️  异常退出，回到 $ORIG_BRANCH"; git checkout "$ORIG_BRANCH" > /dev/null 2>&1 || true; git branch -D "$TEMP_BRANCH" > /dev/null 2>&1 || true' ERR
 
-# 2. 剥离 _proc-use/ from index
+# 2. 剥离 _proc-use/ from index（保留 atdo.test.js，CI 需要）
 if git ls-files _proc-use/ | head -1 | grep -q .; then
   COUNT=$(git ls-files _proc-use/ | wc -l | tr -d ' ')
   git rm -rf --cached _proc-use/ > /dev/null
-  echo "[push-public] 剥离 $COUNT 个 _proc-use/ 文件 from index"
+  # 保留 atdo.test.js（CI 工作流需要测试文件可访问）
+  git add _proc-use/reports/atdo.test.js
+  echo "[push-public] 剥离 $((COUNT - 1)) 个 _proc-use/ 文件，保留 atdo.test.js (CI 需要)"
 else
   echo "[push-public] _proc-use/ 不在 git 索引中，跳过剥离"
 fi
