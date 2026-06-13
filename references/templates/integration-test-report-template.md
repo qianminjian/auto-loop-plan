@@ -104,6 +104,26 @@
 
 ---
 
+## 预期噪声白名单 (atdo-002)
+
+> phase.gate_noise_expected 中声明的 step 失败被 orchestrator 识别为 EXPECTED_NOISE，不计入 gate FAIL 总数。
+> 适用场景：非目标项目环境（如 atdo skill 自身仓库跑 target 项目的 check-*.sh 因缺资产而 FAIL）。
+
+| Step 名 | 失败原因 | 匹配 gate_noise_expected | 标记 |
+|---------|---------|--------------------------|------|
+{{#each expectedNoise}}
+| {{stepName}} | {{failReason}} | {{matchedPattern}} | EXPECTED_NOISE |
+{{/each}}
+
+**gate FAIL 统计**：
+- 总 step：{{totalSteps}}
+- EXPECTED_NOISE：{{expectedNoiseCount}}
+- SKIP：{{skippedCount}}
+- ACTUAL_FAIL：{{actualFailCount}}（= 总 - EXPECTED_NOISE - SKIP）
+- gate 通过判定：ACTUAL_FAIL == 0 → PASS
+
+---
+
 ## 关口结论
 
 **综合判定**: {{gateVerdict}}
