@@ -5,7 +5,8 @@
 # ── 过程材料（不纳入 git）──
 #   _proc-use/dev/      安装/卸载脚本（开发过程调试用）
 #   _proc-use/reports/  运行时审计/测试报告（每次执行产生）
-#   _proc-use/docs/     设计文档、变更记录等过程文档
+#   _proc-use/buginfo/  Bug 报告（过程性）
+#   注：项目设计文档已统一到根目录 doc/（git 跟踪），_proc-use/ 仅保留过程性产物
 _proc-use/
 
 # ── atdo 运行时状态（防御性:本仓库不应产生,但 user 可能误用) ──

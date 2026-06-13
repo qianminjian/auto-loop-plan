@@ -181,7 +181,9 @@ references/templates/
 
 ## 📚 设计文档
 
-atdo 的架构设计、变更记录、决策过程沉淀在以下过程文档中(由 gitignore 排除,本地仓库内可见):
+atdo 的架构设计、变更记录、决策过程沉淀在根目录 `doc/`（git 跟踪）：
 
-- [`_proc-use/docs/README.md`](_proc-use/docs/README.md) — 设计文档总览
-- [`_proc-use/docs/DESIGN.md`](_proc-use/docs/DESIGN.md) — 整体架构与核心决策
+- [`doc/BEACON.md`](doc/BEACON.md) — 项目设计明灯（目标 / 范围 / 决策 / 状态）
+- [`doc/DESIGN.md`](doc/DESIGN.md) — v2.0 双审融合完整架构稿
+- [`doc/PLAN1-infra-atdo003.md`](doc/PLAN1-infra-atdo003.md) — 当前执行 plan（atdo-003 + 基础设施）
+- [`doc/archive/`](doc/archive/) — 历史归档（v3.2 废弃稿）
