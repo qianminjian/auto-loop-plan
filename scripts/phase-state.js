@@ -531,6 +531,14 @@ function cmdInit() {
       if (typeof t !== 'string') die(`阶段 ${String(i + 1).padStart(2, '0')} task 必须是字符串(string),不是 ${typeof t} 也不是 {id, desc} 对象。例:["task A", "task B"]`);
       if (t.length > TASK_LEN_MAX) die(`阶段 ${i + 1} task 长度 > ${TASK_LEN_MAX}`);
     }
+    // atdo-002 F5: gate_noise_expected 校验（对齐 tasks 阈值 ≤ 50 个、每元素 ≤ 500）
+    const gateNoise = p.gate_noise_expected || [];
+    if (!Array.isArray(gateNoise)) die(`阶段 ${i + 1} gate_noise_expected 必须是字符串数组（string[]）`);
+    if (gateNoise.length > TASKS_MAX) die(`阶段 ${i + 1} gate_noise_expected 数量 ${gateNoise.length} > ${TASKS_MAX}`);
+    for (const n of gateNoise) {
+      if (typeof n !== 'string') die(`阶段 ${i + 1} gate_noise_expected 元素必须是字符串`);
+      if (n.length > TASK_LEN_MAX) die(`阶段 ${i + 1} gate_noise_expected 元素长度 ${n.length} > ${TASK_LEN_MAX}`);
+    }
     return {
       number: String(i + 1).padStart(2, '0'),
       name,
@@ -551,6 +559,8 @@ function cmdInit() {
       //                        跳过 audited/fixed(纯验证阶段无新代码产出,无需审计/修复)
       // 输入字段:phase_type(下划线,plan 风格) / phaseType(camelCase)
       phaseType: p.phase_type || p.phaseType || 'implementation',
+      // atdo-002: gate 失败白名单（orchestrator 解析集成测试报告时识别 expected noise）
+      gateNoiseExpected: p.gate_noise_expected || [],
       status: 'pending',
       commits: [],
       commitHash: null,  // 兼容字段:最后一个 commit 的 hash(单 hash 场景与多 hash 场景共用)
@@ -783,6 +793,8 @@ function cmdGetCurrentPhase() {
     isActive: ACTIVE_STATUSES.includes(phase.status),
     // P1-4: 返回 phaseType 让 orchestrator 判断应走标准路径还是 verification 快速路径
     phaseType: phase.phaseType || 'implementation',
+    // atdo-002: 协议层 gate 失败白名单（orchestrator 解析集成测试报告时识别 expected noise）
+    gateNoiseExpected: phase.gateNoiseExpected || [],
     totalPhases: state.phases.length,
     index: state.currentPhaseIndex,
   };

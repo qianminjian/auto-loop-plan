@@ -1043,6 +1043,87 @@ node scripts/phase-state.js proxy-recovery-decision 02 manual-required \
 # → exit 0, orchestrator 接着调 set-phase 02 awaiting_user_review
 ```
 
+### Gate Noise Whitelist (atdo-002)
+
+> **背景**：Gate 集成测试在"非目标项目环境"产生预期 FAIL（例：atdo skill 自身仓库跑 `check-meta.sh` 因无 `asset-docs/` 而 FAIL）。
+> 这些"噪声 FAIL"不是真错，需协议层声明白名单，orchestrator 解析时识别。
+
+#### 触发条件
+
+phase.gate_noise_expected: string[] 非空
+
+#### plan schema 扩展
+
+```jsonc
+{
+  "phases": [{
+    "id": "02",
+    "name": "...",
+    "isGate": true,
+    "gate_noise_expected": [
+      "check-meta",
+      "check-consistency",
+      "check-phase-facts"
+    ]
+  }]
+}
+```
+
+**校验**（F5 对齐 cmdInit task 阈值）：
+- 必须数组（非数组 → die）
+- 元素必须字符串
+- 每元素 ≤ 500 chars
+- 最多 50 个元素
+
+#### orchestrator 行为
+
+解析集成测试报告时：
+1. 调 `get-current-phase` 获取 `gateNoiseExpected` 字段
+2. 对每个 step 失败：
+   - 若 step 名匹配 `gateNoiseExpected` 中任一模式
+   - → 在 integration-test-report.md 标记 `EXPECTED_NOISE`
+   - → 不计入 gate FAIL 总数
+3. gate 通过判定: 总 step - EXPECTED_NOISE - SKIP = ACTUAL_FAIL；ACTUAL_FAIL == 0 → PASS
+
+#### 反例 vs 正例
+
+```jsonc
+// ❌ 反例 1:plan 无 gate_noise_expected，atdo 在非目标项目跑 → step "check-meta" FAIL → gate 红
+{ "phases": [{ "name": "Gate 1", "is_gate": true }] }
+
+// ✅ 正例 1:plan 声明 noise，atdo 识别后放行
+{ "phases": [{
+  "name": "Gate 1", "is_gate": true,
+  "gate_noise_expected": ["check-meta", "check-consistency"]
+}] }
+// → integration-test-report.md 标记这两个 step 为 EXPECTED_NOISE
+// → 不计入 gate FAIL
+// → gate 通过
+
+// ❌ 反例 2:gate_noise_expected 太宽松（匹配所有 step）
+{ "gate_noise_expected": [".*"] }
+// → 所有 step 失败被吞，gate 失去意义
+// 建议:只声明确实"在当前环境无法运行"的 step，不要用通配符吞所有
+
+// ✅ 正例 2:旧 plan 缺字段，向后兼容
+{ "phases": [{ "name": "Gate 1", "is_gate": true }] }
+// → gateNoiseExpected 默认 []，orchestrator 不识别任何 noise，行为同旧版
+```
+
+#### state.json schema 扩展
+
+```jsonc
+{
+  "phases": [{
+    "number": "02",
+    "isGate": true,
+    "gateNoiseExpected": ["check-meta", "check-consistency"]
+  }]
+}
+```
+
+get-current-phase 输出含 `gateNoiseExpected` 字段（缺失时默认空数组，向后兼容）。
+
 ### Manual Gate Protocol (Bug-06)
 
 > **背景**:Gate 3 等场景是"人工对比多篇资产"——这是**用户判断**,agent 不可代理。
