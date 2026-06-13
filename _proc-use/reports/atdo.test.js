@@ -3686,3 +3686,182 @@ describe('v2.0.x P2/P3 微修复', () => {
     });
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// atdo-003 P1: proxy-recovery-decision 命令
+// ─────────────────────────────────────────────────────────────
+// 命令: proxy-recovery-decision <phaseId> <verdict> [--evidence=<path>] [--reason=<r>]
+//   verdict: auto-pass | manual-required
+//   F1 [P0] 强约束: auto-pass 必须带 --evidence 文件，5 维全 PASS（防 LLM agent 偷懒触发 agent 自报告 auto-pass 违反 Bug-05）
+//   manual-required 不需 evidence
+//   reason 长度 ≤ 200 chars
+//   幂等: 同 phase 同 verdict 重复调用 → exit 0 不重复写
+
+describe('atdo-003 proxy-recovery-decision', () => {
+
+  // 1
+  test('verdict=auto-pass 不带 --evidence → die', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-003-1-'));
+    try {
+      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a', tasks: ['t1'] }]}));
+      const r = runIn(d, 'proxy-recovery-decision', '01', 'auto-pass');
+      assert.notEqual(r.code, 0);
+      assert.match(r.stderr, /evidence/i);
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 2
+  test('verdict=auto-pass --evidence 文件不存在 → die', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-003-2-'));
+    try {
+      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a', tasks: ['t1'] }]}));
+      const r = runIn(d, 'proxy-recovery-decision', '01', 'auto-pass', '--evidence=/nonexistent/path/file.json');
+      assert.notEqual(r.code, 0);
+      assert.match(r.stderr, /不存在|not found|no such/i);
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 3
+  test('verdict=auto-pass --evidence 非 JSON → die', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-003-3-'));
+    try {
+      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a', tasks: ['t1'] }]}));
+      const ePath = path.join(d, 'bad-evidence.json');
+      fs.writeFileSync(ePath, 'not json content {{{');
+      const r = runIn(d, 'proxy-recovery-decision', '01', 'auto-pass', `--evidence=${ePath}`);
+      assert.notEqual(r.code, 0);
+      assert.match(r.stderr, /JSON|json/i);
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 4
+  test('verdict=auto-pass --evidence 缺 5 维任一 → die', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-003-4-'));
+    try {
+      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a', tasks: ['t1'] }]}));
+      const ePath = path.join(d, 'incomplete-evidence.json');
+      // 缺 secretScan
+      fs.writeFileSync(ePath, JSON.stringify({
+        fileExistence: 'PASS', syntax: 'PASS', diffRange: 'PASS', debugResidue: 'PASS'
+      }));
+      const r = runIn(d, 'proxy-recovery-decision', '01', 'auto-pass', `--evidence=${ePath}`);
+      assert.notEqual(r.code, 0);
+      assert.match(r.stderr, /secretScan|missing|缺/i);
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 5
+  test('verdict=auto-pass --evidence 任一维度 != "PASS" → die', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-003-5-'));
+    try {
+      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a', tasks: ['t1'] }]}));
+      const ePath = path.join(d, 'fail-evidence.json');
+      // syntax = FAIL
+      fs.writeFileSync(ePath, JSON.stringify({
+        fileExistence: 'PASS', syntax: 'FAIL', diffRange: 'PASS', debugResidue: 'PASS', secretScan: 'PASS'
+      }));
+      const r = runIn(d, 'proxy-recovery-decision', '01', 'auto-pass', `--evidence=${ePath}`);
+      assert.notEqual(r.code, 0);
+      assert.match(r.stderr, /syntax|PASS|FAIL/);
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 6
+  test('verdict=auto-pass --evidence 5 维全 PASS → 写 state.proxyRecovery', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-003-6-'));
+    try {
+      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a', tasks: ['t1'] }]}));
+      const ePath = path.join(d, 'evidence.json');
+      fs.writeFileSync(ePath, JSON.stringify({
+        fileExistence: 'PASS', syntax: 'PASS', diffRange: 'PASS', debugResidue: 'PASS', secretScan: 'PASS'
+      }));
+      const r = runIn(d, 'proxy-recovery-decision', '01', 'auto-pass', `--evidence=${ePath}`, '--reason=bash-mock-fixture');
+      assert.equal(r.code, 0, r.stderr);
+      const state = JSON.parse(fs.readFileSync(path.join(d, '.phase-execution/state.json'), 'utf8'));
+      assert.equal(state.phases[0].proxyRecovery.verdict, 'auto-pass');
+      assert.equal(state.phases[0].proxyRecovery.reason, 'bash-mock-fixture');
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 7
+  test('verdict=manual-required 不需 evidence → 写 state.proxyRecovery', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-003-7-'));
+    try {
+      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a', tasks: ['t1'] }]}));
+      const r = runIn(d, 'proxy-recovery-decision', '01', 'manual-required', '--reason=needs-human-review');
+      assert.equal(r.code, 0, r.stderr);
+      const state = JSON.parse(fs.readFileSync(path.join(d, '.phase-execution/state.json'), 'utf8'));
+      assert.equal(state.phases[0].proxyRecovery.verdict, 'manual-required');
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 8
+  test('verdict 非法值（如 "skip"）→ die', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-003-8-'));
+    try {
+      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a', tasks: ['t1'] }]}));
+      const r = runIn(d, 'proxy-recovery-decision', '01', 'skip');
+      assert.notEqual(r.code, 0);
+      assert.match(r.stderr, /verdict|auto-pass|manual-required/);
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 9
+  test('幂等: 同 phase 同 verdict 重复调用 → exit 0 不重复写 at', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-003-9-'));
+    try {
+      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a', tasks: ['t1'] }]}));
+      const r1 = runIn(d, 'proxy-recovery-decision', '01', 'manual-required', '--reason=first');
+      assert.equal(r1.code, 0);
+      const at1 = JSON.parse(fs.readFileSync(path.join(d, '.phase-execution/state.json'), 'utf8')).phases[0].proxyRecovery.at;
+      const r2 = runIn(d, 'proxy-recovery-decision', '01', 'manual-required', '--reason=second');
+      assert.equal(r2.code, 0);
+      const at2 = JSON.parse(fs.readFileSync(path.join(d, '.phase-execution/state.json'), 'utf8')).phases[0].proxyRecovery.at;
+      // 幂等：at 不变（同 verdict 不重复写）
+      assert.equal(at2, at1, '幂等：at 应保持第一次的值');
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 10
+  test('reason 超 200 chars → die', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-003-10-'));
+    try {
+      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a', tasks: ['t1'] }]}));
+      const longReason = 'x'.repeat(201);
+      const r = runIn(d, 'proxy-recovery-decision', '01', 'manual-required', `--reason=${longReason}`);
+      assert.notEqual(r.code, 0);
+      assert.match(r.stderr, /reason|200/);
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  // 11
+  test('e2e: orchestrator 跑 5 维 → 生成 evidence.json → 调命令 → 验 state shape', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-003-11-'));
+    try {
+      initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a', tasks: ['t1'] }]}));
+      // 模拟 orchestrator 跑 5 维验证，生成 evidence
+      const phaseDir = path.join(d, '.phase-execution/phases/01');
+      fs.mkdirSync(phaseDir, { recursive: true });
+      const ePath = path.join(phaseDir, 'proxy-evidence.json');
+      fs.writeFileSync(ePath, JSON.stringify({
+        fileExistence: 'PASS',
+        syntax: 'PASS',
+        diffRange: 'PASS',
+        debugResidue: 'PASS',
+        secretScan: 'PASS'
+      }, null, 2));
+      // 调命令
+      const r = runIn(d, 'proxy-recovery-decision', '01', 'auto-pass',
+        `--evidence=${ePath}`, '--reason=bash-mock-fixture');
+      assert.equal(r.code, 0, r.stderr);
+      // 验 state shape
+      const state = JSON.parse(fs.readFileSync(path.join(d, '.phase-execution/state.json'), 'utf8'));
+      const pr = state.phases[0].proxyRecovery;
+      assert.ok(pr, 'proxyRecovery 字段应存在');
+      assert.equal(pr.verdict, 'auto-pass');
+      assert.equal(pr.reason, 'bash-mock-fixture');
+      assert.equal(pr.evidence, ePath);
+      assert.match(pr.at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/, 'at 应为 ISO 8601 时间戳');
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+});
