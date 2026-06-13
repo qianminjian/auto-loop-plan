@@ -176,7 +176,32 @@ git config --unset core.hooksPath
 
 **审计评分**: 95/100 (S 级) | **状态**: 🟢 可用于生产
 
-## 命令清单 (19 个)
+## 生产 Bug 修复记录 (Plan 1 + Plan 2 — 2026-06-13)
+
+基于 study-code-output-standard 真实生产运行采集的 4 个 atdo bug 修复：
+
+| Bug | 优先级 | Plan | 修复方案 |
+|-----|--------|------|----------|
+| **atdo-003** | P1 | Plan 1 | `proxy-recovery-decision <id> <verdict> --evidence=<file>` 命令 + § Proxy Recovery Protocol 协议章节 + F1 防 agent 自报告 auto-pass 强约束（5 维 evidence 全 PASS 才能 auto-pass） |
+| **atdo-001** | P2 | Plan 2 | `check-workspace --suggest` 命令智能识别豁免目录（doc/ _proc-use/ .serena/ .phase-execution/）+ SKILL.md Step 0a 改用此命令 |
+| **atdo-004** | P2 | Plan 2 | `advance-phase <id> [--to=<status>]` 命令按 phase.gateType 决策终点（auto→completed / manual→gated） |
+| **atdo-002** | P2 | Plan 2 | 协议层 `gate_noise_expected` 白名单 + § Gate Noise Whitelist 协议章节 + integration-test-report template 加 expectedNoise 段落 |
+
+**测试覆盖**：282 → 318 (+36，含 atdo-003 11 + atdo-001 11 + atdo-004 8 + atdo-002 6)
+**Plan 1/2 commit 数**：A1-B3 (10) + Plan2 C-H (15)
+
+## CI Jobs
+
+| Job | 内容 | 状态 |
+|-----|------|------|
+| Tests (Node 20) | `node _proc-use/reports/atdo.test.js` | 318 pass / 0 fail |
+| Tests (Node 22) | 同上 | 318 pass / 0 fail |
+| Markdown Lint | `markdownlint-cli2 README.md SKILL.md doc/*.md` | 0 errors |
+| Shell Lint | `shellcheck scripts/` | 0 errors |
+| Commit Lint | `commitlint` Angular convention + subject ≤ 100 (中文友好) | — |
+| Secret Scan | grep 15 类 token pattern（与 phase-state.js SECRET_PATTERNS 同步） | — |
+
+## 命令清单 (22 个)
 
 | 命令 | 说明 |
 |------|------|
