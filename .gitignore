@@ -1,9 +1,13 @@
 # 项目开发工作目录
-# 对外发布组件：SKILL.md / scripts/ / references/ / doc/（设计文档，对外可见）
+# 对外发布组件：SKILL.md / scripts/ / references/ / doc/DESIGN.md（结果文档）
 
 # ── 开发过程产物（不推送 GitHub）──
 _proc-use/
 .serena/
+
+# ── doc/ 只保留 DESIGN.md ──
+doc/*
+!doc/DESIGN.md
 
 # ── 运行时瞬态状态 ──
 .phase-execution/
