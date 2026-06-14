@@ -5,6 +5,12 @@
 _proc-use/
 .serena/
 
+# ── 开发工具链（仅本地使用）──
+.githooks/
+.github/
+.markdownlint.json
+commitlint.config.mjs
+
 # ── doc/ 只保留 DESIGN.md ──
 doc/*
 !doc/DESIGN.md
