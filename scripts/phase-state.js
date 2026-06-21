@@ -134,10 +134,9 @@ function atomicWrite(filepath, data) {
   fs.renameSync(tmpPath, filepath);
 }
 
-function readState() {
+// 核心读取逻辑：读主文件 + 备份回退，失败返回 null。供 readState/readStateSafe 复用
+function _tryReadState() {
   let state = readJSON(STATE_FILE);
-  // 主文件损坏/缺失 → 按序回退:bak.1(最近) → bak.2 → bak.3 → 旧版单一 backup
-  // 静默回退会导致时序错位(用户以为在 phase 5,实际回到 phase 3),必须 stderr WARN 告知编排器
   if (!state) {
     for (const f of [...BACKUP_FILES, BACKUP_LEGACY]) {
       state = readJSON(f);
@@ -147,16 +146,8 @@ function readState() {
       }
     }
   }
-  if (!state) {
-    die('状态文件损坏且无备份，无法恢复。请检查 .phase-execution/ 目录。');
-  }
+  if (!state) return null;
   // P3-5: 一次性剥离老 state.json 残留字段
-  //   - networkStatus:未实现 set-network-status 命令(P2-7 删除)
-  //   - exitReason   :未实现 set-exit-reason 命令(P2-7 删除)
-  // 老用户从 v1.x 升级到 v2.0.x 时,state.json 可能仍含这些字段
-  // init 不会主动写(向后兼容旧数据),但每次 readState 时剥离
-  // 命令输出(get / summary 等)不应再泄漏这些字段
-  // 副作用:readState 返回的对象被 in-place 修改,readState 调用方不会感知差异
   let stripped = 0;
   for (const staleField of ['networkStatus', 'exitReason']) {
     if (Object.prototype.hasOwnProperty.call(state, staleField)) {
@@ -165,10 +156,22 @@ function readState() {
     }
   }
   if (stripped > 0) {
-    // 用 stderr 提示(不静默剥离),让 orchestrator 知道发生了兼容清理
     process.stderr.write(`[INFO] readState 剥离 ${stripped} 个已删除字段(${['networkStatus', 'exitReason'].filter(f => true).join('/')}),建议下次写盘时持久化清理\n`);
   }
   return state;
+}
+
+function readState() {
+  const state = _tryReadState();
+  if (!state) {
+    die('状态文件损坏且无备份，无法恢复。请检查 .phase-execution/ 目录。');
+  }
+  return state;
+}
+
+// 安全读 state（文件不存在时返回 null，不报错）
+function readStateSafe() {
+  return _tryReadState();
 }
 
 function writeState(state) {
@@ -657,6 +660,11 @@ function cmdInit() {
     if (plan.options.tdd) {
       state.tddMode = true;
     }
+  }
+  // 保留已有 projectDirs（由 Step 3.5 在 init 前写入，或 --resume 恢复）
+  const oldState = readStateSafe();
+  if (oldState?.projectDirs) {
+    state.projectDirs = oldState.projectDirs;
   }
   writeState(state);
   process.stdout.write(JSON.stringify({ ok: true, phases: phases.length, planHash: planHash || undefined }, null, 2));
@@ -1284,6 +1292,26 @@ function cmdCheckLockAge() {
 // 此命令:读 plan-file 算 md5,与 state.planHash 对比,输出 match/mismatch
 // 退出码:
 //   0 — hash 一致(matched)
+// ─── get-project-dirs ─────────────────────────────────────
+// 命令: get-project-dirs [key]
+//   无参数: 输出 projectDirs 完整 JSON
+//   key=processDir|testDir: 输出单个值
+//   无 state.json 或无 projectDirs 时输出 null
+function cmdGetProjectDirs() {
+  const state = readStateSafe();
+  const dirs = state?.projectDirs;
+  if (!dirs) {
+    process.stdout.write('null');
+    return;
+  }
+  const key = args[0];
+  if (key) {
+    process.stdout.write(dirs[key] || 'null');
+  } else {
+    process.stdout.write(JSON.stringify(dirs));
+  }
+}
+
 //   1 — hash 不一致(mismatch)
 //   2 — state.json 无 planHash 字段(向后兼容 — init 时未传入)
 //   3 — plan-file 不存在 / 读取失败
@@ -1461,13 +1489,62 @@ auto-pass 合规判据：orchestrator 直跑 5 维验证（fileExistence/syntax/
 //     CLEAN                            (空输入 = 工作区干净)
 //     SUGGEST_AUTO_STAGE\n<files>      (全部脏文件在豁免目录)
 //     BLOCK: <non-exempt-files>        (任一非豁免脏文件)
-//   豁免目录列表（F4 YAGNI：硬编码，未来可扩展为 config）
-const WORKSPACE_EXEMPT_PATHS = [
-  '.phase-execution/',  // atdo 运行时
-  'doc/',                // D6 设计文档目录
-  '_proc-use/',          // D7 过程文档目录
-  '.serena/',            // Serena MCP 副产物（PLAN1 撞过的真实场景）
-];
+//   豁免目录: .phase-execution/ / doc/ / {state.projectDirs.processDir 或 _proc-use/} / .serena/
+//   优先读取 state.json.projectDirs.processDir，缺失时回退默认 _proc-use/
+function getExemptPaths() {
+  const processDir = getProjectProcessDir();
+  return ['.phase-execution/', 'doc/', processDir, '.serena/'];
+}
+
+// ─── set-project-dirs ──────────────────────────────────────
+// 命令: set-project-dirs
+//   stdin: JSON { processDir: "_scratch/", testDir: "tests/" }
+//   将目标项目的临时目录约定写入 state.json.projectDirs
+//   由 SKILL.md Step 3.5 在 init 阶段调用
+function cmdSetProjectDirs() {
+  let input;
+  try {
+    input = JSON.parse(fs.readFileSync(0, 'utf8').trim());
+  } catch {
+    die('set-project-dirs 需要有效 JSON 输入（stdin）');
+  }
+  if (!input || typeof input !== 'object') {
+    die('set-project-dirs 需要 JSON object 输入');
+  }
+  // processDir 必须是以 / 结尾的非空字符串
+  if (input.processDir !== undefined) {
+    if (typeof input.processDir !== 'string' || input.processDir.length === 0) {
+      die('set-project-dirs: processDir 必须是非空字符串');
+    }
+    if (!input.processDir.endsWith('/')) {
+      die('set-project-dirs: processDir 必须以 / 结尾');
+    }
+  }
+  // testDir 可选，但如果有则必须是非空字符串
+  if (input.testDir !== undefined) {
+    if (typeof input.testDir !== 'string' || input.testDir.length === 0) {
+      die('set-project-dirs: testDir 必须是非空字符串');
+    }
+  }
+  // 安全读 state，文件不存在时创建最小 state（Step 3.5 可能在 init 前调用）
+  let state = readStateSafe();
+  if (!state) {
+    ensureDir();
+    state = {};
+  }
+  state.projectDirs = {
+    processDir: input.processDir || '_proc-use/',
+    testDir: input.testDir || 'tests/',
+  };
+  writeState(state);
+  process.stdout.write(JSON.stringify({ ok: true, projectDirs: state.projectDirs }));
+}
+
+// 从 state.json 读取 processDir，缺失时回退默认值
+function getProjectProcessDir() {
+  const state = readStateSafe();
+  return state?.projectDirs?.processDir || '_proc-use/';
+}
 
 function cmdCheckWorkspace() {
   if (!args.includes('--suggest')) {
@@ -1501,7 +1578,8 @@ function cmdCheckWorkspace() {
     if (filepath.includes(' -> ')) {
       actualPath = filepath.split(' -> ')[1].trim();
     }
-    const isExempt = WORKSPACE_EXEMPT_PATHS.some(prefix =>
+    const exemptPaths = getExemptPaths();
+    const isExempt = exemptPaths.some(prefix =>
       actualPath.startsWith(prefix)
     );
     if (isExempt) {
@@ -1650,6 +1728,8 @@ const commands = {
   'check-workspace': cmdCheckWorkspace,  // atdo-001 P2
   'advance-phase': cmdAdvancePhase,  // atdo-004 P2
   'compare-plan-hash': cmdComparePlanHash,  // Bug-09 / P2-17
+  'set-project-dirs': cmdSetProjectDirs,  // project temp dir config
+  'get-project-dirs': cmdGetProjectDirs,  // query project dir config
   lock: () => { process.stdout.write(JSON.stringify(acquireLock())); },
   unlock: cmdUnlock,
   'check-disk': () => { process.stdout.write(JSON.stringify(checkDisk())); },

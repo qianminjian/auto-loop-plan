@@ -52,9 +52,11 @@ Agent execution may change shell cwd. To prevent "No such file or directory" err
 
 **PROCESS_FILE_POLICY** — canonical definition. The orchestrator MUST
 copy the code block below verbatim into every spawn prompt (Step 2/4/5/7)
-at the marker `<<INJECT: PROCESS_FILE_POLICY>>`. Do not summarize,
-paraphrase, or shorten — LLM context decay across turns is precisely why
-we re-inject the full text every time.
+at the marker `<<INJECT: PROCESS_FILE_POLICY>>`. Before injection,
+replace all `{{PROCESS_DIR}}` placeholders with the value from
+`state.json.projectDirs.processDir` (default `_proc-use/`).
+Do not summarize, paraphrase, or shorten — LLM context decay across turns
+is precisely why we re-inject the full text every time.
 
 **Injection format** — wrap the code block with explicit boundaries so
 orchestrators don't guess whether to include/exclude markdown fences:
@@ -67,21 +69,21 @@ orchestrators don't guess whether to include/exclude markdown fences:
 [项目政策 — 过程文件隔离,强制执行]
 
 本项目所有非核心交付物的过程文件 — 包括:设计文档、部署/安装脚本、
-测试脚本、调试输出、审计报告、临时测试产物 — 必须放在 _proc-use/ 下,
+测试脚本、调试输出、审计报告、临时测试产物 — 必须放在 {{PROCESS_DIR}} 下,
 按性质分子目录:
 
-  _proc-use/dev/      部署/安装/卸载脚本
-  _proc-use/docs/     设计文档、变更记录
-  _proc-use/reports/  测试报告、审计报告(运行产生)
-  _proc-use/buginfo/  Bug 报告、复盘(长期保留,与 dev/docs/reports
+  {{PROCESS_DIR}}dev/      部署/安装/卸载脚本
+  {{PROCESS_DIR}}docs/     设计文档、变更记录
+  {{PROCESS_DIR}}reports/  测试报告、审计报告(运行产生)
+  {{PROCESS_DIR}}buginfo/  Bug 报告、复盘(长期保留,与 dev/docs/reports
                       等临时过程文件语义不同;未来版本化跟踪时,
                       应移到根目录的 buginfo/)
-  _proc-use/_test-*/  临时单次测试产物(可清理)
-  _proc-use/_audit-*/ 临时单次审计产物(可清理)
+  {{PROCESS_DIR}}_test-*/  临时单次测试产物(可清理)
+  {{PROCESS_DIR}}_audit-*/ 临时单次审计产物(可清理)
   .phase-execution/   运行时 transient 状态(必须 gitignore)
                       含 state.json / phases/<id>/ / gates/<label>/
                       / heartbeat.json / lock / ALERT.md
-                      (与 _proc-use/<phaseId>/ 长期归档的边界见 Bug-11 章节)
+                      (与 {{PROCESS_DIR}}<phaseId>/ 长期归档的边界见 Bug-11 章节)
 
 项目根目录只允许:Git 配置(.git/.gitignore)、核心交付物
 (SKILL.md/README.md)、代码目录(scripts/、references/)、
@@ -89,7 +91,7 @@ License、IDE 配置。CI 配置统一放 .github/。
 过程文件严禁散落根目录或其他未列出位置。
 
 反向引用禁令:核心代码(SKILL.md/scripts/references/)不得
-引用 _proc-use/ 下任何文件,即使生产代码不允许引用测试代码。
+引用 {{PROCESS_DIR}} 下任何文件,即使生产代码不允许引用测试代码。
 
 完成本阶段后,自查:本阶段新增文件是否全在合法位置?根目录是否
 无新孤儿?
@@ -108,14 +110,15 @@ Every spawned agent (gsd-executor / gsd-code-reviewer / gsd-code-fixer
 / gsd-integration-checker) MUST self-check at phase end:
 
 **ATDO BUG REPORT DUTY** — inject this block into every agent spawn
-prompt, immediately after PROCESS_FILE_POLICY:
+prompt, immediately after PROCESS_FILE_POLICY. Replace `{{PROCESS_DIR}}`
+with `state.json.projectDirs.processDir` before injection.
 
 ```
 [INJECTION START — ATDO BUG REPORT DUTY]
 [ATDO 工具问题报告义务 — 强制执行]
 
 本阶段结束时,自查:是否遇到 atdo 工具本身的问题?如有,写入
-_proc-use/_bug-info/atdo-{phaseId}-{category}.md。
+{{PROCESS_DIR}}_bug-info/atdo-{phaseId}-{category}.md。
 
 atdo 问题分类(遇到任一类都应报告):
   - state-machine  : 状态机拒绝合法操作/状态转换异常
@@ -218,15 +221,15 @@ In Step 2 agent spawn prompt, the injection order is:
 > - **atdo runtime 临时 / transient 产物**(运行时中间状态,可被清理)→ `.phase-execution/...`
 >   - 例:`.phase-execution/phases/01/audit-report.md` / `.phase-execution/gates/gate-2-integration/integration-test-report.md`
 >   - 审计模板/集成测试报告模板等"运行时需要复现"的文件,放这里(gitignored)
-> - **长期归档产物**(需 git 保留 / 跨会话追溯)→ `_proc-use/<phaseId>/` 或 `_proc-use/gates/<label>/`
->   - 例:`_proc-use/01/01-execute-1.log`、`_proc-use/02/02-audit-1.md`
+> - **长期归档产物**(需 git 保留 / 跨会话追溯)→ `{{PROCESS_DIR}}<phaseId>/` 或 `{{PROCESS_DIR}}gates/<label>/`
+>   - 例:`{{PROCESS_DIR}}01/01-execute-1.log`、`{{PROCESS_DIR}}02/02-audit-1.md`
 >   - Bug-11 本节规定的"阶段产物 / 关卡产物"专指此类长期归档
 
-- **阶段产物**:`_proc-use/<phaseId>/` 下
-  - 例:`_proc-use/01/01-execute-1.log`、`_proc-use/02/02-audit-1.md`
-- **关卡产物**:`_proc-use/gates/<label>/` 下
-  - 例:`_proc-use/gates/integration/gate-2-integration-1.md`
-- **主状态文件**:`_proc-use/state.json`(运行时由 phase-state.js 维护)
+- **阶段产物**:`{{PROCESS_DIR}}<phaseId>/` 下
+  - 例:`{{PROCESS_DIR}}01/01-execute-1.log`、`{{PROCESS_DIR}}02/02-audit-1.md`
+- **关卡产物**:`{{PROCESS_DIR}}gates/<label>/` 下
+  - 例:`{{PROCESS_DIR}}gates/integration/gate-2-integration-1.md`
+- **主状态文件**:`.phase-execution/state.json`(运行时由 phase-state.js 维护)
 - **根目录严禁扔过程文件**(除 `README.md` / `SKILL.md` / `LICENSE` /
   `.gitignore` / `.github/` 等仓库元数据)
 - **`.phase-execution/`**(gitignored)— 运行时 transient 状态,可保留
@@ -248,7 +251,7 @@ In Step 2 agent spawn prompt, the injection order is:
 
 ### 4. orchestrator 检查行为(软约束)
 
-- 阶段开始前 / 完成后,扫描 `_proc-use/<phaseId>/` 下文件,是否符合命名规范
+- 阶段开始前 / 完成后,扫描 `{{PROCESS_DIR}}<phaseId>/` 下文件,是否符合命名规范
 - 不符合 → 输出 **WARN**(默认不阻断,仅提示)
 - 根目录发现过程文件(非仓库元数据)→ 输出 **WARN**(不阻断)
 - 这是**软约束**——LLM agent 不一定严格遵守,主要靠命名规范本身
@@ -284,7 +287,7 @@ Run directly (no Agent delegation):
 ```bash
 # 0a. Check workspace cleanliness (skip if --force-dirty)
 # atdo-001 修复:用 check-workspace --suggest 智能识别豁免目录
-#   豁免目录: .phase-execution/ (atdo 运行时) / doc/ (D6 设计文档) / _proc-use/ (D7 过程文档) / .serena/ (Serena MCP 副产物)
+#   豁免目录动态读取 state.json.projectDirs.processDir（默认 _proc-use/）
 #   全脏文件在豁免目录 → SUGGEST_AUTO_STAGE → checkpoint 提示
 #   任一非豁免脏文件 → BLOCK → FATAL exit
 if [ "$FORCE_DIRTY" != "true" ]; then
@@ -294,7 +297,7 @@ if [ "$FORCE_DIRTY" != "true" ]; then
     CLEAN*)
       ;;
     SUGGEST_AUTO_STAGE*)
-      echo "[INFO] 检测到豁免目录文件未提交（doc/ _proc-use/ .serena/ .phase-execution/）:"
+      echo "[INFO] 检测到豁免目录文件未提交:"
       echo "$RESULT" | tail -n +2 | sed 's/^/  /'
       echo ""
       echo "建议先 git add+commit 这些文件再启动 atdo，或在 checkpoint 选择继续"
@@ -322,7 +325,8 @@ bash scripts/watchdog.sh cleanup
 node scripts/phase-state.js check-disk  # ≥500MB free
 
 # 0d. Ensure _bug-info directory exists (P2-1)
-#     agent 在遇到 atdo 工具问题时写入此目录,Step 3 verification 检查
+#     Step 3.5 will create the project-policy-correct dir; here we ensure
+#     the default exists as fallback for early agent spawns
 mkdir -p _proc-use/_bug-info
 ```
 If any check fails → write ALERT.md, exit. Do NOT auto-fix environment issues.
@@ -482,6 +486,54 @@ atdo 默认假设"plan = 阶段序列"(Phase 1 → Phase 2 → ...),但有些 pl
 **Dependency validation**: Build directed graph, topological sort. Cycle detected → ALERT.md + exit.
 
 **Oversized phase detection**: If any phase has >15 tasks → warn, suggest splitting.
+
+### Step 3.5: Project Policy Detection
+
+Read the target project's `.claude/CLAUDE.md` (NOT atdo's own) to extract
+project-specific conventions. If the file does not exist, use atdo defaults.
+
+```bash
+PROJECT_CLAUDE_MD="$PROJECT_ROOT/.claude/CLAUDE.md"
+if [ -f "$PROJECT_CLAUDE_MD" ]; then
+  # Extract temp/process directory convention
+  # Match patterns: "临时产物写入 <dir>" / "过程文件.*放在 <dir>" / "_scratch/" / "_proc-use/"
+  PROCESS_DIR=$(grep -oE '(临时产物写入|过程文件.*放在)\s+[^\s,，]+' "$PROJECT_CLAUDE_MD" \
+    | head -1 | grep -oE '[^\s,，]+$' || true)
+  if [ -z "$PROCESS_DIR" ]; then
+    # Fallback: detect bare directory declarations like _scratch/ (exclude common non-process dirs)
+    PROCESS_DIR=$(grep -oE '\b_[a-z][a-z_-]*/' "$PROJECT_CLAUDE_MD" \
+      | grep -vE '_(proc-use|build|cache|dist|output|tmp|temp|github|vscode|idea)/' | head -1 || true)
+  fi
+  PROCESS_DIR="${PROCESS_DIR:-_proc-use/}"
+  # Ensure trailing slash
+  [[ "$PROCESS_DIR" != */ ]] && PROCESS_DIR="${PROCESS_DIR}/"
+
+  # Extract test directory convention
+  TEST_DIR=$(grep -oE '(测试文件在|测试目录|test[s]?\s+dir)[^\n]*' "$PROJECT_CLAUDE_MD" \
+    | grep -oE '[^\s,，]+/' | head -1 || true)
+  TEST_DIR="${TEST_DIR:-tests/}"
+else
+  PROCESS_DIR="_proc-use/"
+  TEST_DIR="tests/"
+fi
+
+echo "{\"processDir\":\"$PROCESS_DIR\",\"testDir\":\"$TEST_DIR\"}" \
+  | node scripts/phase-state.js set-project-dirs
+
+# Ensure the correct process directory structure exists
+mkdir -p "${PROCESS_DIR}_bug-info" "${PROCESS_DIR}dev" "${PROCESS_DIR}docs" "${PROCESS_DIR}reports"
+```
+
+Extraction rules (simple regex, no LLM):
+1. Match `临时产物写入 <dir>` or `过程文件...放在 <dir>` → use `<dir>`
+2. If not found, scan for bare `_<name>/` directory declarations (excluding `_proc-use/`)
+3. If nothing matched → default `_proc-use/`
+4. Test directory: match `测试文件在 <dir>` or `tests/` → default `tests/`
+
+The resolved `projectDirs` are persisted in state.json and used by:
+- `check-workspace --suggest` (exempt path list)
+- `PROCESS_FILE_POLICY` injection (processDir substitution)
+- All phase artifact path templates
 
 ### Step 4: State Initialization
 ```bash
@@ -755,10 +807,12 @@ Record findings to execution-log.md.
 **3f. Bug report compliance check (P0-1)**:
 ```bash
 # 检查本阶段 agent 是否向 _bug-info 写了报告
-# 如果 _proc-use/_bug-info/ 下无本阶段新文件,输出 WARN(不阻断)
-NEW_BUGS=$(find _proc-use/_bug-info -name "atdo-${phaseId}-*.md" -newer .phase-execution/state.json 2>/dev/null || true)
+# 读取 state.json 获取 processDir,回退默认 _proc-use/
+PROCESS_DIR_BUGCHECK=$(node -e "try{process.stdout.write(require('fs').readFileSync('.phase-execution/state.json','utf8').match(/\"processDir\":\"([^\"]+)\"/)?.[1]||'_proc-use/')}catch(e){process.stdout.write('_proc-use/')}")
+# 如果 processDir/_bug-info/ 下无本阶段新文件,输出 WARN(不阻断)
+NEW_BUGS=$(find "${PROCESS_DIR_BUGCHECK}_bug-info" -name "atdo-${phaseId}-*.md" -newer .phase-execution/state.json 2>/dev/null || true)
 if [ -z "$NEW_BUGS" ]; then
-  echo "[WARN] 本阶段 agent 未向 _proc-use/_bug-info/ 写入 atdo 工具问题报告。"
+  echo "[WARN] 本阶段 agent 未向 ${PROCESS_DIR_BUGCHECK}_bug-info/ 写入 atdo 工具问题报告。"
   echo "       如果 agent 确实没遇到 atdo 问题,此 WARN 可忽略。"
   echo "       如果 agent 遇到了但未报告,下阶段 prompt 中 ATDO BUG REPORT DUTY 会再次提醒。"
 fi
