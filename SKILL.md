@@ -5,7 +5,7 @@ description: >-
   executes phases sequentially, auto-audits each phase, auto-fixes issues,
   runs integration tests at gates, auto-commits at quality gates.
   Use for long-running multi-phase projects.
-argument-hint: "<plan-file> [--from N] [--to N] [--only N] [--resume] [--dry-run] [--no-audit]"
+argument-hint: "<plan-file> [--from N] [--to N] [--only N] [--resume] [--dry-run] [--no-audit] [--tdd]"
 ---
 
 # atdo
@@ -146,13 +146,46 @@ The orchestrator MUST re-inject this block into EVERY agent spawn prompt
 (Step 2/4/5/7). The injection order is:
 1. `[INJECTION START — PROCESS_FILE_POLICY]` ... `[INJECTION END — PROCESS_FILE_POLICY]`
 2. `[INJECTION START — ATDO BUG REPORT DUTY]` ... `[INJECTION END — ATDO BUG REPORT DUTY]`
-3. Task-specific instructions
+3. `[INJECTION START — TDD 协议]` ... `[INJECTION END — TDD 协议]` **(仅 --tdd)**
+4. Task-specific instructions
 
 > **P3-1 性能提示**:PROCESS_FILE_POLICY + ATDO BUG REPORT DUTY 合计 ~1.5K
 > tokens,每次注入增加 agent 首次响应延迟。长期优化方向:将这两个 block
 > 缓存到 agent skill-level context 前缀中(类似 system prompt),而非每次
 > 在 task prompt 中注入。当前(2026-06)每次注入是正确的工程选择(简单优先),
 > 因为 Claude Code 尚无 skill-level context prefix 机制。
+
+### TDD Protocol Injection (--tdd)
+
+> **触发条件**：`--tdd` 参数传入 → state.json `tddMode: true`。
+> 仅在此条件下注入，不传不注入，行为与旧版一致。
+
+The orchestrator MUST inject this block into the Step 2 (gsd-executor) spawn prompt
+when `state.tddMode === true`. Injection order: after PROCESS_FILE_POLICY
+and ATDO BUG REPORT DUTY, before task-specific instructions.
+
+```
+[INJECTION START — TDD 协议]
+
+强制执行 TDD 流程：
+
+1. 读取项目根目录的 CLAUDE.md，找到"修改验证协议"或"TDD"章节
+2. 按其中定义的 RED → GREEN → REFACTOR 步骤执行
+3. 使用 CLAUDE.md 统一命令表中的测试命令
+4. RED 未确认 FAIL 前，禁止进入 GREEN
+5. 全部测试 PASS 后才能输出 [AUTO-EXEC-RESULT: status=SUCCESS]
+
+[INJECTION END — TDD 协议]
+```
+
+### TDD injection order
+
+In Step 2 agent spawn prompt, the injection order is:
+
+1. `[INJECTION START — PROCESS_FILE_POLICY]` ... `[INJECTION END — PROCESS_FILE_POLICY]`
+2. `[INJECTION START — ATDO BUG REPORT DUTY]` ... `[INJECTION END — ATDO BUG REPORT DUTY]`
+3. `[INJECTION START — TDD 协议]` ... `[INJECTION END — TDD 协议]` **(仅 --tdd)**
+4. Task-specific instructions
 
 ## 过程文件命名与位置规范 (Bug-11)
 
@@ -241,6 +274,7 @@ The orchestrator MUST re-inject this block into EVERY agent spawn prompt
 | `--dry-run` | Parse plan, show phases, don't execute |
 | `--no-audit` | Skip agent audit 报告生成(状态机仍走 `executed → audited` 自动完成,不 spawn gsd-code-reviewer) |
 | `--force-dirty` | Allow execution with dirty workspace (diff tracking may be unreliable) |
+| `--tdd` | Enforce TDD protocol: Step 2 agent MUST follow RED → GREEN → REFACTOR before touching code |
 | `AUTO_PHASE_NO_CONFIRM=true` | Skip all checkpoints (fully unattended) |
 
 ## Startup Sequence
@@ -660,6 +694,7 @@ Spawn gsd-executor agent with this prompt structure:
 ```
 <<INJECT: PROCESS_FILE_POLICY>>
 <<INJECT: ATDO BUG REPORT DUTY>>
+<<INJECT: TDD 协议>>       (仅当 --tdd / state.tddMode === true)
 ────────────────────────────────────────
 (以下是你本阶段的任务)
 

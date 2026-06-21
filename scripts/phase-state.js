@@ -649,6 +649,15 @@ function cmdInit() {
   if (planHash !== null) {
     state.planHash = planHash;
   }
+  // --tdd: TDD 模式开关(仅当 plan.options.tdd 为 boolean true 时写入)
+  if (plan.options && Object.prototype.hasOwnProperty.call(plan.options, 'tdd')) {
+    if (typeof plan.options.tdd !== 'boolean') {
+      die(`init: plan.options.tdd 必须是 boolean,不是 ${typeof plan.options.tdd}`);
+    }
+    if (plan.options.tdd) {
+      state.tddMode = true;
+    }
+  }
   writeState(state);
   process.stdout.write(JSON.stringify({ ok: true, phases: phases.length, planHash: planHash || undefined }, null, 2));
 }
