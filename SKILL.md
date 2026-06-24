@@ -1560,8 +1560,8 @@ find .phase-execution/phases/<phaseId> -maxdepth 1 -name '*.log' -exec mv {} .ph
   Minimum granularity is 1 minute (no 270s equivalent).
 
   ```bash
-  # Compute target time (now + 5 min, in cron syntax)
-  TARGET_EPOCH=$(( $(date +%s) + 300 ))
+  # Compute target time (now + 1 min, in cron syntax — CronCreate minimum granularity)
+  TARGET_EPOCH=$(( $(date +%s) + 60 ))
   TARGET_MIN=$(date -r $TARGET_EPOCH +%M)
   TARGET_HOUR=$(date -r $TARGET_EPOCH +%H)
   ```
