@@ -834,7 +834,7 @@ fi
 > # --to=<status> 强制目标 (路径上须可达)
 > ```
 
-Spawn gsd-code-reviewer agent:
+Spawn gsd-code-reviewer agent (`subagent_type: "gsd-code-reviewer"`,不要用内置只读 `code-reviewer`):
 ```
 <<INJECT: PROCESS_FILE_POLICY>>
 <<INJECT: ATDO BUG REPORT DUTY>>
@@ -850,6 +850,18 @@ Output at end: [AUTO-EXEC-RESULT: status=SUCCESS|FAILED, methodology=proxy|real|
 ```
 
 After agent returns:
+- **MANDATORY 产物验证 (atdo-01)** — 文件必须同时存在且非空,否则视为 agent-spawn 失败:
+  ```bash
+  AUDIT_REPORT=".phase-execution/phases/${phaseId}/audit-report.md"
+  if [ ! -f "$AUDIT_REPORT" ] || [ ! -s "$AUDIT_REPORT" ]; then
+    echo "[ERROR] audit-report.md 缺失或为空 — agent 报告 SUCCESS 但未生成文件"
+    echo "        可能原因: spawn 到了无 Write 工具的内置 code-reviewer(应使用 gsd-code-reviewer)"
+    # 复用现有 fix 维度 strike,沿用 3-strike 协议(strike ≥ 3 → ALERT 自动触发)
+    node scripts/phase-state.js inc-strike <phaseId> fix
+    echo "[FIX-LOOP] 重 spawn gsd-code-reviewer(强制 subagent_type)"
+    # → 重 spawn 回到本 Step 4 起点,subagent_type 已强约束
+  fi
+  ```
 - Run sanitize on audit report: `node scripts/phase-state.js sanitize .phase-execution/phases/{N}/audit-report.md`
 - Update state: `executed → audited`
 
@@ -899,7 +911,7 @@ If NOT a gate: skip to step 8 (completion).
 
 **7. Gate Integration Test** (gate phases only)
 
-Spawn gsd-integration-checker agent:
+Spawn gsd-integration-checker agent (`subagent_type: "gsd-integration-checker"`,同 Step 4 协议强化):
 ```
 <<INJECT: PROCESS_FILE_POLICY>>
 <<INJECT: ATDO BUG REPORT DUTY>>
@@ -914,6 +926,19 @@ Use template at ~/.agents/skills/atdo/references/templates/integration-test-repo
 
 Output: [AUTO-EXEC-RESULT: status=SUCCESS|FAILED, methodology=proxy|real|mixed, integration_errors=<count>]
 ```
+
+After agent returns:
+- **MANDATORY 产物验证 (atdo-01)** — integration-test-report.md 必须同时存在且非空,否则视为 agent-spawn 失败:
+  ```bash
+  INTEGRATION_REPORT=".phase-execution/gates/${gateLabel}/integration-test-report.md"
+  if [ ! -f "$INTEGRATION_REPORT" ] || [ ! -s "$INTEGRATION_REPORT" ]; then
+    echo "[ERROR] integration-test-report.md 缺失或为空 — agent 报告 SUCCESS 但未生成文件"
+    # 复用现有 integration 维度 strike,沿用 3-strike 协议
+    node scripts/phase-state.js inc-strike <phaseId> integration
+    echo "[FIX-LOOP] 重 spawn gsd-integration-checker(强制 subagent_type)"
+    # → 重 spawn 回到本 Step 7 起点
+  fi
+  ```
 
 If integration failures → gate fix loop (max 3 attempts):
 ```
