@@ -13,7 +13,13 @@ STATE_DIR=".phase-execution"
 HEARTBEAT_FILE="$STATE_DIR/heartbeat.json"
 LOCK_FILE="$STATE_DIR/lock"
 STATE_FILE="$STATE_DIR/state.json"
-HEARTBEAT_TIMEOUT=300  # 5 分钟无心跳判定僵死
+# P0-1 (Task Timeout & Heartbeat Protocol):
+# 三级响应常量(fallback 场景,当 heartbeat.json 无 taskDeadline 字段时使用)
+WARN_TIMEOUT=300        # 5 min  → 软警告(stderr 输出,不写 state)
+STRIKE_TIMEOUT=600      # 10 min → 硬警告(调 inc-strike slow-heartbeat)
+KILL_TIMEOUT=900        # 15 min → 终止(SIGTERM + 30s 后 SIGKILL + 清 lock)
+# 有 taskDeadline 时 → 用相对阈值(taskDuration × 33% / 66% / 100%)
+STRIKE_KIND="slow-heartbeat"  # inc-strike 的 type 字段
 
 # ─── 清理孤儿进程 ───────────────────────────────────────
 
@@ -118,28 +124,99 @@ check_heartbeat() {
 
   diff_sec=$((now_sec - hb_sec))
 
-  if [ "$diff_sec" -gt "$HEARTBEAT_TIMEOUT" ]; then
-    echo "[watchdog] ALERT: 心跳超时 ${diff_sec}s > ${HEARTBEAT_TIMEOUT}s，编排器可能已僵死"
-
-    # 读取锁文件确认
-    if [ -f "$LOCK_FILE" ]; then
-      local lock_pid
-      lock_pid=$(node -e "try{process.stdout.write(String(require('./$LOCK_FILE').pid))}catch{}" 2>/dev/null || echo "")
-      if [ -n "$lock_pid" ]; then
-        if ! kill -0 "$lock_pid" 2>/dev/null; then
-          echo "[watchdog] 编排器进程 $lock_pid 已不存在，清理锁文件"
-          rm -f "$LOCK_FILE"
-        else
-          echo "[watchdog] 编排器进程 $lock_pid 仍存活但无心跳，发送 SIGTERM"
-          kill -TERM "$lock_pid" 2>/dev/null || true
-        fi
+  # P0-1:优先读 taskDeadline(若有)→ 相对阈值;否则用 fallback 绝对值 5/10/15 min
+  local warn_threshold strike_threshold kill_threshold use_relative
+  use_relative=false
+  if [ -s "$HEARTBEAT_FILE" ]; then
+    local task_deadline_sec
+    task_deadline_sec=$(node -e "try{const d=require('./$HEARTBEAT_FILE').taskDeadline;if(!d)process.exit(1);process.stdout.write(String(Math.floor(new Date(d).getTime()/1000)))}catch{process.exit(1)}" 2>/dev/null || echo "0")
+    if [ -n "$task_deadline_sec" ] && [ "$task_deadline_sec" -gt 0 ]; then
+      local task_duration=$((task_deadline_sec - hb_sec))
+      if [ "$task_duration" -gt 0 ]; then
+        warn_threshold=$((task_duration / 3))
+        strike_threshold=$((task_duration * 2 / 3))
+        kill_threshold=$task_duration
+        use_relative=true
       fi
     fi
+  fi
+  if [ "$use_relative" = false ]; then
+    warn_threshold=$WARN_TIMEOUT
+    strike_threshold=$STRIKE_TIMEOUT
+    kill_threshold=$KILL_TIMEOUT
+  fi
+
+  # P0-1:三级响应 — soft warn / hard warn(strike) / kill
+  if [ "$diff_sec" -ge "$kill_threshold" ]; then
+    action_kill "$diff_sec" "$kill_threshold" "$use_relative"
     return 1
+  elif [ "$diff_sec" -ge "$strike_threshold" ]; then
+    action_strike "$diff_sec" "$strike_threshold" "$use_relative"
+    return 1
+  elif [ "$diff_sec" -ge "$warn_threshold" ]; then
+    action_warn "$diff_sec" "$warn_threshold" "$use_relative"
+    return 0
   else
     echo "[watchdog] 心跳正常 (${diff_sec}s 前)"
     return 0
   fi
+}
+
+# ─── P0-1:三级响应 action 函数 ───────────────────────────────
+# 设计:action_warn 不写 state(避免误判);action_strike 调 inc-strike;
+#       action_kill 发送 SIGTERM → 30s 后 SIGKILL → 清 lock + heartbeat
+
+action_warn() {
+  local diff="$1" threshold="$2" relative="$3"
+  local kind
+  [ "$relative" = "true" ] && kind="相对阈值(taskDuration×33%)" || kind="fallback 绝对阈值(${WARN_TIMEOUT}s)"
+  echo "[watchdog] [WARN] heartbeat slow: ${diff}s ≥ ${threshold}s (${kind})"
+  echo "[watchdog] orchestrator 下一 turn 检查到 warn 后应注入提示给 agent"
+}
+
+action_strike() {
+  local diff="$1" threshold="$2" relative="$3"
+  local kind
+  [ "$relative" = "true" ] && kind="相对阈值(taskDuration×66%)" || kind="fallback 绝对阈值(${STRIKE_TIMEOUT}s)"
+  echo "[watchdog] [STRIKE] heartbeat slow: ${diff}s ≥ ${threshold}s (${kind})"
+  # 调 phase-state.js inc-strike 写 state
+  # 用 watchdog.sh 所在目录解析 scripts/phase-state.js 绝对路径,避免 cwd 漂移导致找不到
+  local phase_state_bin="${WATCHDOG_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/phase-state.js"
+  local current_phase
+  current_phase=$(node -e "try{const s=require('./$STATE_FILE');process.stdout.write(s.phases?.[s.currentPhaseIndex]?.number||'')}catch{process.stdout.write('')}" 2>/dev/null || echo "")
+  if [ -n "$current_phase" ]; then
+    node "$phase_state_bin" inc-strike "$current_phase" "$STRIKE_KIND" 2>&1 | tail -1 || true
+  else
+    echo "[watchdog] [WARN] 无法读 currentPhaseIndex,跳过 strike 写入"
+  fi
+}
+
+action_kill() {
+  local diff="$1" threshold="$2" relative="$3"
+  local kind
+  [ "$relative" = "true" ] && kind="相对阈值(taskDuration×100%)" || kind="fallback 绝对阈值(${KILL_TIMEOUT}s)"
+  echo "[watchdog] [KILL] heartbeat timeout: ${diff}s ≥ ${threshold}s (${kind})"
+  # 读取锁文件确认
+  if [ -f "$LOCK_FILE" ]; then
+    local lock_pid
+    lock_pid=$(node -e "try{process.stdout.write(String(require('./$LOCK_FILE').pid))}catch{}" 2>/dev/null || echo "")
+    if [ -n "$lock_pid" ]; then
+      if ! kill -0 "$lock_pid" 2>/dev/null; then
+        echo "[watchdog] 编排器进程 $lock_pid 已不存在，清理锁文件"
+        rm -f "$LOCK_FILE"
+      else
+        echo "[watchdog] 编排器进程 $lock_pid 仍存活但无心跳，发送 SIGTERM"
+        kill -TERM "$lock_pid" 2>/dev/null || true
+        sleep 30
+        if kill -0 "$lock_pid" 2>/dev/null; then
+          echo "[watchdog] 进程未响应 SIGTERM，发送 SIGKILL"
+          kill -KILL "$lock_pid" 2>/dev/null || true
+        fi
+      fi
+    fi
+  fi
+  # 清 heartbeat(避免下一轮立刻再次 kill)
+  rm -f "$HEARTBEAT_FILE" 2>/dev/null || true
 }
 
 # ─── 强制终止 ───────────────────────────────────────────

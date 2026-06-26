@@ -1375,6 +1375,84 @@ user-review-fail     → (终态,ALERT)
 completed            → (终态)
 ```
 
+### Task Timeout & Heartbeat Protocol (P0-1)
+
+> **背景**:watchdog 5min 硬超时只能盯 orchestrator 整体心跳,无法区分"短任务"
+> 和"长任务"。agent spawn 卡死时无任务级超时保护。本节定义**任务级加权超时**
+> + **5/10/15 min 三级心跳响应协议**。
+
+#### 1. 加权超时公式
+
+```javascript
+// phase-state.js compute-timeout 命令
+const TIMEOUT_BASE = { trivial: 5, small: 8, medium: 12, large: 20, huge: 30 };
+function computeTimeout(complexity = 'medium', attempt = 1) {
+  const base = TIMEOUT_BASE[complexity] || 12;
+  const factor = 1 + 0.15 * Math.max(0, attempt - 1);  // 重试给缓冲(LLM 慢响应)
+  const raw = base * factor;
+  return Math.min(35, Math.max(3, Math.round(raw)));   // 上下限 [3, 35] 分钟
+}
+```
+
+**复杂度基线**:
+| complexity | base (min) | 典型场景 |
+|-----------|-----------|---------|
+| `trivial` | 5 | 单文件 lint / 格式化 |
+| `small` | 8 | 单文件 ≤200 行改动 |
+| `medium` | 12 | 典型 phase, 3-10 文件(默认) |
+| `large` | 20 | 架构级, 10-30 文件 |
+| `huge` | 30 | 全栈重构, 30+ 文件 |
+
+**经验值来源**: Claude Sonnet/Opus 单任务 3-8 min,agent spawn 损耗 30-60s,
+长输出(10K+ tokens) 4-6 min。base=12 覆盖 80% 任务,large/huge 给 buffer。
+
+**使用方式**:
+```bash
+# 显式计算 deadline
+node scripts/phase-state.js compute-timeout large 3
+# → {"complexity":"large","attempt":3,"minutes":26,"isoDeadline":"2026-06-26T02:06:49Z",...}
+
+# 写到 heartbeat.json + state.json.taskTimeouts(让 watchdog 读到)
+node scripts/phase-state.js set-task-deadline <phaseId> <isoDeadline>
+# → {"ok":true,"phaseId":"01","deadline":"..."}
+```
+
+#### 2. 三级心跳响应协议
+
+| 阈值 | 触发条件 | watchdog 动作 | orchestrator 后续 |
+|------|---------|--------------|------------------|
+| 软警告 | `diff ≥ taskTimeout × 33%` 或 fallback `5min` | stderr 输出 `[WARN]`,不写 state | 下一 turn 检查 warn → 注入提示给 agent |
+| 硬警告 | `diff ≥ taskTimeout × 66%` 或 fallback `10min` | `inc-strike <phaseId> slow-heartbeat` 写 state | strike 累加到 STRIKE_THRESHOLDS.sameCategory=5 → ALERT |
+| 终止 | `diff ≥ taskTimeout × 100%` 或 fallback `15min` | SIGTERM → 30s 后 SIGKILL → 清 lock + heartbeat | orchestrator 看到 phase 仍 in_progress 无 hb → 升级 ALERT |
+
+**fallback 行为**: 当 heartbeat.json 无 `taskDeadline` 字段 → watchdog 用绝对值
+`WARN_TIMEOUT=300` / `STRIKE_TIMEOUT=600` / `KILL_TIMEOUT=900`(5/10/15 min),向后兼容
+v0.x 行为。
+
+**优先级**:
+- 有 `taskDeadline` → 用相对阈值(`taskDuration × 33% / 66% / 100%`)
+- 无 `taskDeadline` → 用 fallback 绝对值(5/10/15 min)
+
+#### 3. 与现有协议兼容性
+
+| 协议 | 兼容性 | 说明 |
+|------|--------|------|
+| **Bug-06**(manual gate) | ✅ 兼容 | watchdog L84 已检查 `awaiting_user_review` 标记,manual gate 进行时 3 级响应全跳过 |
+| **Bug-08**(lock 持有语义) | ✅ 兼容 | kill 行为仅清 lock + heartbeat,不影响 state.json 完整性 |
+| **P1-4**(verification 快速路径) | ✅ 兼容 | verification phase 不需要 taskDeadline,fallback 行为不变 |
+| **paused heartbeat** | ✅ 兼容 | status=paused 时 watchdog 仍按时间差判定(orchestrator 主动 pause 时应同时清 taskDeadline) |
+| **atdo-004 advance-phase** | ✅ 兼容 | 不影响 advance-phase 命令路径 |
+
+#### 4. Fail Fast 设计(故意不做的事)— P0-1 补充
+
+在原 §4 Fail Fast 基础上,P0-1 补充:
+- ❌ **不设 watchdog 默认 taskTimeout**。任务超时由 orchestrator 在 spawn 前显式
+  调 `compute-timeout` + `set-task-deadline`,不依赖默认值(LLM context decay 时
+  默认值可能不可信)。
+- ❌ **kill 不绕过 state.json**。即使 watchdog kill 了锁文件对应的 PID,state.json
+  不被直接改写 — phase 仍标 in_progress,orchestrator 下一 turn 检测到异常后
+  决定 reset 还是升级 ALERT(避免"kill 误改 status"导致状态机失序)。
+
 **4. Fail Fast 设计**(故意不做的事)
 
 - ❌ **不调 CronCreate**。Manual gate 进行时,atdo 完全 hold,不创建下一次自动唤醒。

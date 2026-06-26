@@ -19,6 +19,8 @@
  *   node phase-state.js unlock --reason=<r>       释放锁(Bug-08:必须带 --reason,合法值 all-completed|aborted|alert)
  *   node phase-state.js check-disk                磁盘空间检查
  *   node phase-state.js check-test-runtime        孤儿 node 测试进程检测(test-discipline)
+ *   node phase-state.js compute-timeout [complexity] [attempt]  P0-1: 加权超时计算
+ *   node phase-state.js set-task-deadline <phaseId> <isoTime>   P0-1: 写 taskDeadline
  *   node phase-state.js sanitize <file>           脱敏文件中的密钥
  *   node phase-state.js heartbeat                 写入心跳
  *   node phase-state.js summary                   输出当前状态摘要
@@ -358,10 +360,16 @@ function parseDfOutput(dfOutput, minMB = 500) {
 
 const HEARTBEAT_STATUSES = ['active', 'paused', 'completed', 'failed'];
 
-function writeHeartbeat(phaseId, taskId, status) {
+function writeHeartbeat(phaseId, taskId, status, taskDeadline) {
   // P2-C: status 白名单(防止 LLM 传 "RUNNING"/"完成" 等异体字符串,让 watchdog 误判)
   if (status !== undefined && status !== null && status !== '' && !HEARTBEAT_STATUSES.includes(status)) {
     die(`heartbeat status 无效: "${status}",有效值: ${HEARTBEAT_STATUSES.join(', ')}`);
+  }
+  // P0-1:taskDeadline 可选(ISO 时间戳),watchdog 读它做相对阈值判定
+  if (taskDeadline !== undefined && taskDeadline !== null && taskDeadline !== '') {
+    if (Number.isNaN(new Date(taskDeadline).getTime())) {
+      die(`heartbeat taskDeadline 无效: "${taskDeadline}" — 必须是 ISO 8601 时间戳`);
+    }
   }
   ensureDir();
   const hb = {
@@ -371,7 +379,59 @@ function writeHeartbeat(phaseId, taskId, status) {
     currentTask: taskId || null,
     status: status || 'active',
   };
+  if (taskDeadline) hb.taskDeadline = taskDeadline;
   fs.writeFileSync(HEARTBEAT_FILE, JSON.stringify(hb, null, 2), 'utf8');
+}
+
+// P0-1:加权超时计算(根据任务复杂度 + 重试次数)
+// 设计:
+//   - BASE[taskComplexity] = 任务基准超时(分钟)
+//   - factor = 1 + 0.15 * (attempt - 1)  → 重试给缓冲(LLM 慢响应)
+//   - 上下限 [3, 35] 分钟(下限防误杀,上限防无限等)
+// 经验值:Claude Sonnet/Opus 单任务 3-8 min,agent spawn 损耗 30-60s,
+//        长输出(10K+ tokens) 4-6 min。base=12 覆盖 80%,large/huge 给 buffer。
+const TIMEOUT_BASE = { trivial: 5, small: 8, medium: 12, large: 20, huge: 30 };
+function computeTimeout(complexity = 'medium', attempt = 1) {
+  const base = TIMEOUT_BASE[complexity] || 12;
+  const factor = 1 + 0.15 * Math.max(0, attempt - 1);
+  const raw = base * factor;
+  return Math.min(35, Math.max(3, Math.round(raw)));
+}
+
+function cmdComputeTimeout() {
+  const complexity = args[0] || 'medium';
+  const attempt = parseInt(args[1] || '1', 10);
+  if (!Number.isFinite(attempt) || attempt < 1) die(`compute-timeout attempt 必须 ≥ 1 的整数,收到: ${args[1]}`);
+  const minutes = computeTimeout(complexity, attempt);
+  const isoDeadline = new Date(Date.now() + minutes * 60 * 1000).toISOString();
+  process.stdout.write(JSON.stringify({
+    complexity, attempt, minutes,
+    isoDeadline,
+    formula: `min(35, max(3, round(${TIMEOUT_BASE[complexity] || 12} × (1 + 0.15 × ${attempt - 1}))))`,
+  }));
+}
+
+function cmdSetTaskDeadline() {
+  const phaseId = args[0];
+  const isoTime = args[1];
+  if (!phaseId) die('set-task-deadline 需要 phaseId');
+  if (!isoTime) die('set-task-deadline 需要 ISO 时间戳(第二个参数)');
+  if (Number.isNaN(new Date(isoTime).getTime())) die(`set-task-deadline: 无效 ISO 时间戳 "${isoTime}"`);
+  ensureDir();
+  const state = readStateSafe() || {};
+  state.taskTimeouts = state.taskTimeouts || {};
+  state.taskTimeouts[phaseId] = {
+    deadline: isoTime,
+    setAt: new Date().toISOString(),
+  };
+  writeState(state);
+  // 同时写 heartbeat.json(若存在),watchdog 直接读
+  if (fs.existsSync(HEARTBEAT_FILE)) {
+    const hb = JSON.parse(fs.readFileSync(HEARTBEAT_FILE, 'utf8'));
+    hb.taskDeadline = isoTime;
+    fs.writeFileSync(HEARTBEAT_FILE, JSON.stringify(hb, null, 2), 'utf8');
+  }
+  process.stdout.write(JSON.stringify({ ok: true, phaseId, deadline: isoTime }));
 }
 
 // ─── Tier 3.5 任务列表型 plan 解析 (F-01) ─────────────────────
@@ -1814,8 +1874,10 @@ const commands = {
   'check-disk': () => { process.stdout.write(JSON.stringify(checkDisk())); },
   'check-lock-age': cmdCheckLockAge,  // Bug-08 / P3-24
   'check-test-runtime': cmdCheckTestRuntime,  // test-discipline rule
+  'compute-timeout': cmdComputeTimeout,  // P0-1: 加权超时计算
+  'set-task-deadline': cmdSetTaskDeadline,  // P0-1: 写 taskDeadline 到 state.json + heartbeat.json
   sanitize: cmdSanitize,
-  heartbeat: () => { writeHeartbeat(args[0], args[1], args[2]); process.stdout.write(JSON.stringify({ ok: true })); },
+  heartbeat: () => { writeHeartbeat(args[0], args[1], args[2], args[3]); process.stdout.write(JSON.stringify({ ok: true })); },
   summary: cmdSummary,
 };
 
