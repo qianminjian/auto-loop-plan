@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'feat/**', 'fix/**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Tests (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Run atdo tests
+        run: bash scripts/test-unit.sh
+
+  markdown-lint:
+    name: Markdown Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DavidAnson/markdownlint-cli2-action@v16
+        with:
+          globs: 'README.md SKILL.md doc/*.md doc/archive/*.md'
+
+  shell-lint:
+    name: Shell Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: scripts
+
+  commit-lint:
+    name: Commit Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: wagoid/commitlint-github-action@v6
+        with:
+          configFile: commitlint.config.mjs
+
+  secret-scan:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan changed files for secrets
+        run: |
+          # PR vs push: 计算 diff 范围
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            BASE_REF="${GITHUB_BASE_REF}"
+            git fetch origin "$BASE_REF" --depth=1
+            BASE="origin/$BASE_REF"
+          else
+            # push 事件: 比较 HEAD~1 vs HEAD（首次 commit 时回退到全扫）
+            BASE="HEAD~1"
+            git rev-parse "$BASE" >/dev/null 2>&1 || BASE=""
+          fi
+
+          if [ -z "$BASE" ]; then
+            CHANGED=$(git ls-files | grep -E '\.(js|ts|sh|md|json|yml|yaml|py|go|rs)$' || true)
+          else
+            CHANGED=$(git diff --name-only "$BASE"...HEAD | grep -E '\.(js|ts|sh|md|json|yml|yaml|py|go|rs)$' || true)
+          fi
+
+          if [ -z "$CHANGED" ]; then
+            echo "no scannable changed files"
+            exit 0
+          fi
+
+          # SECRET_PATTERNS（与 phase-state.js SECRET_PATTERNS L207-233 同步保持）
+          # 15 类: OpenAI / Anthropic / GitHub PAT / AWS / GitLab / Slack / Docker / npm / PyPI / Atlassian / PEM
+          PATTERNS='(sk-[a-zA-Z0-9]{20,})|(sk-ant-api[0-9]+-[a-zA-Z0-9_-]{20,})|(ghp_[a-zA-Z0-9]{20,})|(github_pat_[a-zA-Z0-9_]{20,})|(gho_[a-zA-Z0-9]{20,})|(ghu_[a-zA-Z0-9]{20,})|(ghs_[a-zA-Z0-9]{20,})|(ghr_[a-zA-Z0-9]{20,})|(AKIA[A-Z0-9]{16})|(glpat-[a-zA-Z0-9_-]{20,})|(xox[abprs]-[a-zA-Z0-9-]{10,})|(dckr_pat_[a-zA-Z0-9_-]{20,})|(npm_[a-zA-Z0-9]{16,})|(pypi-AgEIcHlwaS5vcmc[a-zA-Z0-9_-]{20,})|(ATATT[a-zA-Z0-9_-]{20,})|(-----BEGIN [A-Z ]+PRIVATE KEY-----)'
+
+          FOUND=0
+          for f in $CHANGED; do
+            [ -f "$f" ] || continue
+            if grep -EHn "$PATTERNS" "$f"; then
+              FOUND=1
+            fi
+          done
+          if [ $FOUND -eq 1 ]; then
+            echo "❌ Secrets detected in changed files"
+            exit 1
+          fi
+          echo "✅ No secrets detected ($(echo "$CHANGED" | wc -l | tr -d ' ') files scanned)"
