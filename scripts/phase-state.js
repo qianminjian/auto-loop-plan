@@ -20,6 +20,11 @@
  *   node phase-state.js check-disk                磁盘空间检查
  *   node phase-state.js check-test-runtime        孤儿 node 测试进程检测(test-discipline)
  *   node phase-state.js get-audit-default         P1-1: 输出 audit 默认值 on|off
+ *   node phase-state.js plan-validate <file>      P2-1: 校验 plan 格式
+ *   node phase-state.js plan-backup <file>        P2-1: 备份到 <file>.orig.<ts>.md
+ *   node phase-state.js plan-diff <json1> <json2> P2-1: 核对任务数
+ *   node phase-state.js detect-plan-tier <file>   P2-1: 探测 plan tier + needsConvert 信号
+ *   node phase-state.js transform-tier2 <text>    P2-1: Tier 3.5 → Tier 2 转化
  *   node phase-state.js compute-timeout [complexity] [attempt]  P0-1: 加权超时计算
  *   node phase-state.js set-task-deadline <phaseId> <isoTime>   P0-1: 写 taskDeadline
  *   node phase-state.js sanitize <file>           脱敏文件中的密钥
@@ -1452,6 +1457,81 @@ function cmdGetProjectDirs() {
   }
 }
 
+// ─── detect-plan-tier (P2-1) ──────────────────────────────
+// 设计:在 cmdInit 之前,orchestrator 先调 detect-plan-tier 探测 plan 格式
+//   - valid: bool(plan 格式是否合规)
+//   - tier: 'phase-sequence' | 'task-list' | 'unknown'
+//   - needsConvert: bool(是否需要 LLM 智能转化)
+//   - suggestedFormat: 'tier-2'(建议目标格式)
+//   - rawText: 原始 markdown 文本(供 LLM 转化使用)
+// 退出码:
+//   0 — valid(可直接 init)
+//   1 — 文件不存在 / 读取失败
+//   2 — needsConvert: true(需 LLM 智能转化)
+function cmdDetectPlanTier() {
+  const planFile = args[0];
+  if (!planFile) die('detect-plan-tier 需要 plan 文件路径作为参数');
+  if (!fs.existsSync(planFile)) die(`detect-plan-tier: 文件不存在 "${planFile}"`);
+
+  const rawText = fs.readFileSync(planFile, 'utf8').trim();
+  let tier = 'unknown';
+  let needsConvert = false;
+  let issues = [];
+
+  // 1. 尝试 JSON 解析(Tier 2)
+  let isJson = false;
+  try { JSON.parse(rawText); isJson = true; } catch {}
+
+  // 2. 检测 Tier 3.5(任务列表型)
+  const isTaskList = /^###\s+P[0-3]-\d{1,2}\b/m.test(rawText);
+  // 3. 检测 Tier 3(阶段序列型 LLM-based)
+  const isPhaseSeq = /^#{2,3}\s*Phase\s+\d+/im.test(rawText);
+
+  if (isJson) {
+    tier = 'phase-sequence';
+    try {
+      const plan = JSON.parse(rawText);
+      if (!Array.isArray(plan.phases) || plan.phases.length === 0) {
+        issues.push('JSON plan 缺 phases[] 字段或为空');
+        needsConvert = true;
+      }
+    } catch (e) {
+      issues.push(`JSON 解析失败: ${e.message}`);
+      needsConvert = true;
+    }
+  } else if (isTaskList && isPhaseSeq) {
+    issues.push('plan 同时含阶段序列和任务列表,语义冲突');
+    needsConvert = true;
+  } else if (isTaskList) {
+    tier = 'task-list';
+  } else if (isPhaseSeq) {
+    tier = 'phase-sequence';
+  } else {
+    issues.push('未匹配任何 Tier 格式');
+    needsConvert = true;
+  }
+
+  // 4. 优先级越界
+  if (/^###\s+P([4-9])-\d{1,2}\b/m.test(rawText)) {
+    issues.push('priority 必须在 0/1/2/3 之一,检测到 P4-P9 越界');
+    needsConvert = true;
+  }
+
+  const result = {
+    valid: !needsConvert && issues.length === 0,
+    tier,
+    needsConvert,
+    suggestedFormat: 'tier-2',
+    issues,
+    rawTextLength: rawText.length,
+  };
+
+  // 输出 stdout JSON
+  process.stdout.write(JSON.stringify(result, null, 2));
+  // needsConvert 时 exit 2(让 orchestrator 区分 "已规划" vs "需转化")
+  if (needsConvert) process.exit(2);
+}
+
 // ─── get-audit-default (P1-1) ──────────────────────────────
 // 协议(SKILL.md §4 Agent Audit):audit 默认 off,仅 --audit 才 spawn gsd-code-reviewer。
 //   此命令:输出 audit 默认值 'off' 或 'on',供 orchestrator / 用户反查默认值。
@@ -1464,6 +1544,176 @@ function cmdGetAuditDefault() {
   const state = readStateSafe();
   const isOn = state?.noAudit === false;
   process.stdout.write(isOn ? 'on' : 'off');
+}
+
+// ─── P2-1: plan 格式自动转化 ──────────────────────────────
+// 设计:phase-state.js 提供机械原语(检测/备份/核对/转化)
+//   LLM 智能转化在 SKILL.md 协议层(orchestrator),避免引入依赖
+// 命令:
+//   plan-validate <plan-file>    — 校验 + 返回 issues 列表
+//   plan-backup <plan-file>      — 备份到 <plan-file>.orig.<ISO-ts>.md
+//   plan-diff <orig-json> <new-json>  — 数任务,delta != 0 → die
+//   transform-tier2 <raw-text>   — 纯函数:parseTaskListPlan → 补字段 → Tier 2 JSON
+
+// 任务计数(用于 planDiff)
+function countTasks(phases) {
+  if (!Array.isArray(phases)) return 0;
+  return phases.reduce((s, p) => s + (Array.isArray(p.tasks) ? p.tasks.length : 0), 0);
+}
+
+// 从 markdown 文本提取 task 候选行数(用于 LLM 转化前后一致性核对)
+// 规则:含 `- [ ]` / `- [x]` / `- ` 任意一行的非标题/非注释行
+//   - 跳过 HTML 注释块(<!-- ... --> 之间的行)
+//   - 跳过标题行(#/##/### 开头)
+//   - 跳过空行
+function countMarkdownTasks(text) {
+  if (!text) return 0;
+  let n = 0;
+  let inComment = false;
+  for (const line of text.split('\n')) {
+    // HTML 注释块跟踪
+    if (line.includes('<!--')) inComment = true;
+    if (inComment) {
+      if (line.includes('-->')) inComment = false;
+      continue;
+    }
+    if (/^#{1,3}\s+/.test(line)) continue;  // 跳过标题
+    if (/^\s*-\s+(?:\[[ xX]\]\s+)?\S/.test(line)) n++;
+  }
+  return n;
+}
+
+function cmdPlanValidate() {
+  const planFile = args[0];
+  if (!planFile) die('plan-validate 需要 plan 文件路径作为参数');
+  if (!fs.existsSync(planFile)) die(`plan-validate: 文件不存在 "${planFile}"`);
+  const raw = fs.readFileSync(planFile, 'utf8');
+  const issues = [];
+
+  // 1. 尝试 JSON 解析(Tier 2)
+  let isJson = false;
+  try { JSON.parse(raw); isJson = true; } catch {}
+
+  // 2. 检测 Tier 3.5(任务列表型)
+  const isTaskList = /^###\s+P[0-3]-\d{1,2}\b/m.test(raw);
+  // 3. 检测 Tier 3(阶段序列型 LLM-based)
+  const isPhaseSeq = /^#{2,3}\s*Phase\s+\d+/im.test(raw);
+
+  if (!isJson && !isTaskList && !isPhaseSeq) {
+    issues.push('未匹配任何 Tier 格式(非 JSON,无 P?-N,无 ## Phase N:)');
+  }
+
+  // 4. Tier 3.5 反例:同时有阶段序列 + 任务列表
+  if (isTaskList && isPhaseSeq) {
+    issues.push('plan 同时含阶段序列(## Phase N:)和任务列表(### P?-N),语义冲突');
+  }
+
+  // 5. 优先级越界检测
+  const priorityOutOfRange = /^###\s+P([4-9])-\d{1,2}\b/m.test(raw);
+  if (priorityOutOfRange) {
+    issues.push('任务列表型 plan 的 priority 必须在 0/1/2/3 之一,检测到 P4-P9 越界');
+  }
+
+  // 6. JSON 时简单结构校验
+  if (isJson) {
+    try {
+      const plan = JSON.parse(raw);
+      if (!Array.isArray(plan.phases)) issues.push('JSON plan 缺 phases[] 字段');
+      else if (plan.phases.length === 0) issues.push('JSON plan phases[] 为空');
+      else {
+        plan.phases.forEach((p, i) => {
+          if (!p.name && !p.id) issues.push(`phase[${i}] 缺 name/id`);
+          if (p.tasks && !Array.isArray(p.tasks)) issues.push(`phase[${i}] tasks 必须是数组`);
+        });
+      }
+    } catch (e) {
+      issues.push(`JSON 解析失败: ${e.message}`);
+    }
+  }
+
+  // 输出结果
+  const valid = issues.length === 0;
+  process.stdout.write(JSON.stringify({
+    valid,
+    issues,
+    detectedFormat: isJson ? 'json' : isTaskList ? 'task-list' : isPhaseSeq ? 'phase-sequence' : 'unknown',
+    needsConvert: !valid,
+  }, null, 2));
+}
+
+function cmdPlanBackup() {
+  const planFile = args[0];
+  if (!planFile) die('plan-backup 需要 plan 文件路径作为参数');
+  if (planFile === '-') die('plan-backup 不支持 stdin 模式(无法备份,要求传文件路径)');
+  if (!fs.existsSync(planFile)) die(`plan-backup: 文件不存在 "${planFile}"`);
+  // ISO 时间戳,文件名安全字符(替换 : . -)
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupPath = `${planFile}.orig.${ts}.md`;
+  fs.copyFileSync(planFile, backupPath);
+  process.stdout.write(JSON.stringify({ ok: true, backupPath, originalSize: fs.statSync(planFile).size }));
+}
+
+function cmdPlanDiff() {
+  const origJson = args[0];
+  const newJson = args[1];
+  if (!origJson || !newJson) die('plan-diff 需要两个 JSON 字符串作为参数(原始 + 转化后)');
+  let orig, converted;
+  try { orig = JSON.parse(origJson); }
+  catch (e) { die(`plan-diff: 原始 JSON 解析失败: ${e.message}`); }
+  try { converted = JSON.parse(newJson); }
+  catch (e) { die(`plan-diff: 转化后 JSON 解析失败: ${e.message}`); }
+
+  // 任务数核对(P2-1:rawText 优先 — LLM 转化场景下 markdown 行数是 ground truth)
+  let originalCount;
+  if (typeof orig.rawText === 'string') {
+    originalCount = countMarkdownTasks(orig.rawText);
+  } else if (Array.isArray(orig.phases) && orig.phases.length > 0) {
+    originalCount = countTasks(orig.phases);
+  } else {
+    die('plan-diff: 原始 JSON 缺 rawText 或非空 phases[] 字段');
+  }
+  const convertedCount = countTasks(converted.phases);
+
+  const delta = originalCount - convertedCount;
+  if (delta !== 0) {
+    die(`plan-diff: 转化后任务数 ${convertedCount} != 原始 ${originalCount},差 ${delta} — 转化丢失任务,中止`);
+  }
+
+  process.stdout.write(JSON.stringify({
+    ok: true,
+    originalCount,
+    convertedCount,
+    delta: 0,
+  }));
+}
+
+function cmdTransformTier2() {
+  // 纯函数:输入 markdown 文本,输出 Tier 2 JSON(含 _meta.convertedFrom 标记)
+  const rawText = args[0];
+  if (!rawText) die('transform-tier2 需要 markdown 文本作为参数');
+  const phases = parseTaskListPlan(rawText);
+  if (!phases || phases.length === 0) {
+    die('transform-tier2: parseTaskListPlan 返回空(可能不是 Tier 3.5 格式)');
+  }
+  // 补字段(name 已带 P?-N: 前缀,补 goal / depends_on / tasks)
+  const tier2 = {
+    phases: phases.map((p, i) => ({
+      number: String(i + 1).padStart(2, '0'),
+      name: p.name,
+      goal: '',
+      tasks: p.tasks || [],
+      depends_on: p.depends_on || [],
+      is_gate: false,
+      gate_type: 'auto',
+      phase_type: 'implementation',
+    })),
+    _meta: {
+      convertedFrom: 'task-list',
+      convertedAt: new Date().toISOString(),
+      sourceFormat: 'Tier 3.5 markdown',
+    },
+  };
+  process.stdout.write(JSON.stringify(tier2, null, 2));
 }
 
 //   1 — hash 不一致(mismatch)
@@ -1891,6 +2141,11 @@ const commands = {
   'check-test-runtime': cmdCheckTestRuntime,  // test-discipline rule
   'compute-timeout': cmdComputeTimeout,  // P0-1: 加权超时计算
   'get-audit-default': cmdGetAuditDefault,  // P1-1: 输出 audit 默认值
+  'plan-validate': cmdPlanValidate,  // P2-1: 校验 plan 格式
+  'plan-backup': cmdPlanBackup,  // P2-1: 备份 plan 文件
+  'plan-diff': cmdPlanDiff,  // P2-1: 核对任务数
+  'detect-plan-tier': cmdDetectPlanTier,  // P2-1: 探测 plan tier + 返回 needsConvert
+  'transform-tier2': cmdTransformTier2,  // P2-1: Tier 3.5 → Tier 2 转化
   'set-task-deadline': cmdSetTaskDeadline,  // P0-1: 写 taskDeadline 到 state.json + heartbeat.json
   sanitize: cmdSanitize,
   heartbeat: () => { writeHeartbeat(args[0], args[1], args[2], args[3]); process.stdout.write(JSON.stringify({ ok: true })); },

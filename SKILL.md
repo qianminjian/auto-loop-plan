@@ -398,6 +398,35 @@ node scripts/phase-state.js lock
 If `--resume`: read state.json, skip plan parsing, go to Execution Loop.
 Otherwise: parse plan → show at checkpoint → wait for confirmation → write state.json.
 
+### Step 2.5: Plan Format Auto-Convert (P2-1)
+
+> **触发条件**:`detect-plan-tier <plan-file>` 返回 `needsConvert: true`
+> **设计**:phase-state.js 提供机械原语(检测/备份/核对),LLM 智能转化在协议层
+
+```bash
+[1] orchestrator 调 detect-plan-tier <plan-file>
+    exit 0 → 走 Step 3 正常流程
+    exit 2 → needsConvert: true,进入 [2]
+
+[2] 显示检测报告(tier / issues / suggestedFormat)
+[3] AskUserQuestion:
+    "plan 格式需转化,是否自动转为 Tier 2 JSON?(备份原 plan)"
+    - 接受 → [4]
+    - 拒绝 → ALERT.md + exit
+
+[4] plan-backup <plan-file>
+    → <plan-file>.orig.<ISO-ts>.md(回退路径)
+[5] orchestrator 用 LLM 智能转化:
+    - 解析 markdown 章节/列表 → Tier 2 JSON 草案
+    - 调 transform-tier2 <rawText> 生成参考
+[6] plan-diff <orig-with-rawText> <converted>
+    - delta != 0 → die('转化丢失 K 个任务,中止')
+    - delta == 0 → [7]
+[7] 写新 plan-file(JSON 格式),重新 init
+```
+
+**stdin 模式限制**:plan 备份需要文件路径(stdin 无法备份)。`--resume` 模式跳过此协议。
+
 ### Step 3: Plan Parsing (Four-Tier)
 
 **Tier 1 — Known format**: If `.planning/ROADMAP.md` exists, use `gsd-tools query roadmap.analyze`.
@@ -821,7 +850,6 @@ fi
 **4. Agent Audit** (only if `--audit` flag is set; default: off)
 
 > **P1-1 默认值翻转**:audit 报告生成**默认关闭**(节省 token + 时间,多数场景不需要);仅当显式传 `--audit` 才 spawn gsd-code-reviewer。状态机仍走 `executed → audited`(orchestrator 在默认模式下用 `advance-phase` 一气呵成,不依赖 audit 报告)。
-
 > **P1-4 协议明确**:`--no-audit` / 默认模式仅跳过"agent audit 报告生成"(不 spawn gsd-code-reviewer),但状态机 **必须** 仍走 `executed → audited`(orchestrator 在该模式下直接 `set-phase ... audited`,不依赖 audit 报告)。这样跳过 audit 与 Bug-06 严格状态机无矛盾:状态机推进不停,只是少一个 agent spawn。
 >
 > **推荐用 `advance-phase` 批量推进 (atdo-004)**:`--no-audit` 模式下 orchestrator 用单一命令替代多次 `set-phase`:
@@ -1377,11 +1405,79 @@ user-review-fail     → (终态,ALERT)
 completed            → (终态)
 ```
 
+### Plan Conversion Protocol (P2-1)
+
+> **背景**:半结构化 plan 输入(优先级越界 / 混合格式 / 缺字段)直接 `die()`,
+> 用户体验差。本节定义"提示 → 备份 → LLM 转化 → 核对"完整闭环。
+
+#### 1. 三层分工
+
+| 层 | 职责 | 实现 |
+|----|------|------|
+| **检测层** (phase-state.js) | 判断 plan 是否需要转化 + 给出 issues 列表 | `detect-plan-tier` / `plan-validate` 命令 |
+| **备份层** (phase-state.js) | 转化前备份原 plan | `plan-backup` 命令 |
+| **核对层** (phase-state.js) | 转化前后任务数一致性 | `plan-diff` 命令 |
+| **转化层** (SKILL.md / LLM) | 半结构化 → Tier 2 JSON | orchestrator 调 LLM 生成 JSON |
+
+**约束**:phase-state.js 仅提供机械原语,**不引入 LLM 依赖**(零依赖原则)。
+LLM 智能转化在 orchestrator 层(SKILL.md Step 2.5)。
+
+#### 2. 命令清单
+
+| 命令 | 输入 | 输出 | 退出码 |
+|------|------|------|--------|
+| `detect-plan-tier <file>` | plan 文件路径 | `{valid, tier, needsConvert, issues}` | 0=valid / 1=文件不存在 / 2=needsConvert |
+| `plan-validate <file>` | plan 文件路径 | `{valid, issues, detectedFormat}` | 0=always |
+| `plan-backup <file>` | plan 文件路径 | `{ok, backupPath}` | 0=成功 / 1=失败(文件不存在 / stdin 模式) |
+| `plan-diff <orig-json> <new-json>` | 两个 JSON 字符串 | `{ok, originalCount, convertedCount, delta}` | 0=delta=0 / 1=delta≠0 |
+| `transform-tier2 <text>` | markdown 文本 | Tier 2 JSON + `_meta.convertedFrom` | 0=成功 / 1=格式不匹配 |
+
+#### 3. 备份与恢复机制
+
+- **路径**: `<plan-file>.orig.<ISO-ts>.md`(ISO 时间戳,`:` 和 `.` 替换为 `-`,人类可读)
+- **示例**: `doc/PLAN3-v4-optimize.md` → `doc/PLAN3-v4-optimize.md.orig.2026-06-26T03-36-38-059Z.md`
+- **保留策略**:仅保留**最近一次**备份(避免多次 init 产生多个备份)
+- **恢复**:用户可手动 `cp <plan>.orig.<ts>.md <plan-file>` 回退
+- **stdin 模式限制**:`plan-backup <stdin>` 拒绝(无法备份,SKILL.md Step 2.5 注明建议传文件路径)
+
+#### 4. 任务数核对算法
+
+```javascript
+// 优先用 rawText 计数(markdown 行数是 ground truth)
+if (typeof orig.rawText === 'string') {
+  originalCount = countMarkdownTasks(orig.rawText);  // 跳过 HTML 注释 + 标题
+} else if (Array.isArray(orig.phases) && orig.phases.length > 0) {
+  originalCount = orig.phases.reduce((s, p) => s + p.tasks.length, 0);
+}
+const convertedCount = converted.phases.reduce((s, p) => s + p.tasks.length, 0);
+if (originalCount !== convertedCount) {
+  die(`转化后任务数 ${convertedCount} != 原始 ${originalCount},差 ${originalCount - convertedCount}`);
+}
+```
+
+**HTML 注释排除规则**:`<!-- ... -->` 之间的行不算 task(避免 LLM 引用文档的列表项误计)。
+
+#### 5. 与现有协议兼容性
+
+- **Bug-09(planHash)** | ✅ 兼容 | 备份原 plan 后,planHash 仍是原 plan 的 md5(转化后 plan 是新文件) |
+- **Tier 3 LLM-based extraction** | ✅ 兼容 | orchestrator 可选走 Tier 3 路径(纯 markdown,LLM 智能提取) |
+- **Step 2 State Loading** | ✅ 兼容 | needsConvert 时不直接 init,先做转化 |
+
+#### 6. 边界场景
+
+| 场景 | 行为 |
+|------|------|
+| `plan-validate` 输入 stdin(JSON 或 markdown) | die('需要文件路径') |
+| `plan-backup` 输入 stdin | die('stdin 模式不支持备份') |
+| `plan-diff` 任一 JSON 解析失败 | die(明确错误) |
+| `transform-tier2` 输入非 Tier 3.5 格式 | die('parseTaskListPlan 返回空') |
+| `detect-plan-tier` 检测到 tier 冲突(同时 task-list + phase-sequence) | needsConvert=true,issues 列冲突 |
+
 ### Task Timeout & Heartbeat Protocol (P0-1)
 
 > **背景**:watchdog 5min 硬超时只能盯 orchestrator 整体心跳,无法区分"短任务"
 > 和"长任务"。agent spawn 卡死时无任务级超时保护。本节定义**任务级加权超时**
-> + **5/10/15 min 三级心跳响应协议**。
+> 加上 **5/10/15 min 三级心跳响应协议**。
 
 #### 1. 加权超时公式
 
