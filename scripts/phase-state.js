@@ -19,6 +19,7 @@
  *   node phase-state.js unlock --reason=<r>       释放锁(Bug-08:必须带 --reason,合法值 all-completed|aborted|alert)
  *   node phase-state.js check-disk                磁盘空间检查
  *   node phase-state.js check-test-runtime        孤儿 node 测试进程检测(test-discipline)
+ *   node phase-state.js get-audit-default         P1-1: 输出 audit 默认值 on|off
  *   node phase-state.js compute-timeout [complexity] [attempt]  P0-1: 加权超时计算
  *   node phase-state.js set-task-deadline <phaseId> <isoTime>   P0-1: 写 taskDeadline
  *   node phase-state.js sanitize <file>           脱敏文件中的密钥
@@ -1451,6 +1452,20 @@ function cmdGetProjectDirs() {
   }
 }
 
+// ─── get-audit-default (P1-1) ──────────────────────────────
+// 协议(SKILL.md §4 Agent Audit):audit 默认 off,仅 --audit 才 spawn gsd-code-reviewer。
+//   此命令:输出 audit 默认值 'off' 或 'on',供 orchestrator / 用户反查默认值。
+//   实现:从 state.json 顶层 noAudit / tddMode 推断(默认 off)
+// 退出码: 0 — 总是成功
+// 输出:  'on' 或 'off'(纯字符串,便于 orchestrator 脚本判断)
+function cmdGetAuditDefault() {
+  // P1-1: audit 默认 off(state.noAudit 未设或 === true 都表示 audit off)
+  // 只有显式 state.noAudit === false 才表示 audit on(用户显式 --audit)
+  const state = readStateSafe();
+  const isOn = state?.noAudit === false;
+  process.stdout.write(isOn ? 'on' : 'off');
+}
+
 //   1 — hash 不一致(mismatch)
 //   2 — state.json 无 planHash 字段(向后兼容 — init 时未传入)
 //   3 — plan-file 不存在 / 读取失败
@@ -1875,6 +1890,7 @@ const commands = {
   'check-lock-age': cmdCheckLockAge,  // Bug-08 / P3-24
   'check-test-runtime': cmdCheckTestRuntime,  // test-discipline rule
   'compute-timeout': cmdComputeTimeout,  // P0-1: 加权超时计算
+  'get-audit-default': cmdGetAuditDefault,  // P1-1: 输出 audit 默认值
   'set-task-deadline': cmdSetTaskDeadline,  // P0-1: 写 taskDeadline 到 state.json + heartbeat.json
   sanitize: cmdSanitize,
   heartbeat: () => { writeHeartbeat(args[0], args[1], args[2], args[3]); process.stdout.write(JSON.stringify({ ok: true })); },

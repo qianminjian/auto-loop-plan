@@ -5,7 +5,7 @@ description: >-
   executes phases sequentially, auto-audits each phase, auto-fixes issues,
   runs integration tests at gates, auto-commits at quality gates.
   Use for long-running multi-phase projects.
-argument-hint: "<plan-file> [--from N] [--to N] [--only N] [--resume] [--dry-run] [--no-audit] [--tdd]"
+argument-hint: "<plan-file> [--from N] [--to N] [--only N] [--resume] [--dry-run] [--audit] [--tdd]"
 ---
 
 # atdo
@@ -275,7 +275,7 @@ In Step 2 agent spawn prompt, the injection order is:
 | `--only N` | Execute only phase N |
 | `--resume` | Resume from `.phase-execution/state.json` |
 | `--dry-run` | Parse plan, show phases, don't execute |
-| `--no-audit` | Skip agent audit 报告生成(状态机仍走 `executed → audited` 自动完成,不 spawn gsd-code-reviewer) |
+| `--audit` | **启用** agent audit 报告生成(默认 off,需显式开启才 spawn gsd-code-reviewer);保留旧 `--no-audit` 作 no-op 兼容 |
 | `--force-dirty` | Allow execution with dirty workspace (diff tracking may be unreliable) |
 | `--tdd` | Enforce TDD protocol: Step 2 agent MUST follow RED → GREEN → REFACTOR before touching code |
 | `AUTO_PHASE_NO_CONFIRM=true` | Skip all checkpoints (fully unattended) |
@@ -818,9 +818,11 @@ if [ -z "$NEW_BUGS" ]; then
 fi
 ```
 
-**4. Agent Audit** (unless `--no-audit` flag is set)
+**4. Agent Audit** (only if `--audit` flag is set; default: off)
 
-> **P1-4 协议明确**:`--no-audit` 仅跳过"agent audit 报告生成"(不 spawn gsd-code-reviewer),但状态机 **必须** 仍走 `executed → audited`(orchestrator 在该模式下直接 `set-phase ... audited`,不依赖 audit 报告)。这样 `--no-audit` 与 Bug-06 严格状态机无矛盾:状态机推进不停,只是少一个 agent spawn。
+> **P1-1 默认值翻转**:audit 报告生成**默认关闭**(节省 token + 时间,多数场景不需要);仅当显式传 `--audit` 才 spawn gsd-code-reviewer。状态机仍走 `executed → audited`(orchestrator 在默认模式下用 `advance-phase` 一气呵成,不依赖 audit 报告)。
+
+> **P1-4 协议明确**:`--no-audit` / 默认模式仅跳过"agent audit 报告生成"(不 spawn gsd-code-reviewer),但状态机 **必须** 仍走 `executed → audited`(orchestrator 在该模式下直接 `set-phase ... audited`,不依赖 audit 报告)。这样跳过 audit 与 Bug-06 严格状态机无矛盾:状态机推进不停,只是少一个 agent spawn。
 >
 > **推荐用 `advance-phase` 批量推进 (atdo-004)**:`--no-audit` 模式下 orchestrator 用单一命令替代多次 `set-phase`:
 >
