@@ -24,7 +24,7 @@ bash scripts/test-integration.sh  # 集成测试，仅 E2E（~20s，带 --test-t
 bash scripts/test-cleanup.sh      # 清理 .phase-execution 残留 + 孤儿测试进程
 
 # 直接调 node:test（调试时用，绕过入口脚本）
-node --test --test-timeout=30000 _proc-use/reports/atdo.test.js
+node --test --test-timeout=30000 tests/atdo.test.js
 
 # Markdown lint
 npx markdownlint-cli2 README.md SKILL.md doc/*.md
@@ -93,6 +93,7 @@ shellcheck scripts/*.sh
 | `README.md` | 项目说明 |
 | `.gitignore` | 忽略规则 |
 | `.claude/rules/` | 项目级运行时规则（如 `test-discipline.md`）|
+| `tests/` | atdo skill 自身测试（GitHub Actions 可见）|
 
 ### 排除清单（❌ 不推送）
 

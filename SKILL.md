@@ -265,6 +265,27 @@ In Step 2 agent spawn prompt, the injection order is:
 - ❌ 过程文件散落根目录 / `scripts/` / `references/` 等核心代码目录
 - ❌ stepName 取白名单之外的值(如 `run` / `check` / `test` / `debug`)
 
+### 6. 测试代码例外 (PLAN4 / 2026-06-26)
+
+> **背景**:atdo skill 自身的测试代码(atdo.test.js)是正式源代码,**不是**
+> 运行时过程产物。它需要纳入 git 跟踪,供 GitHub Actions CI 跑测试。
+> 但 .gitignore 把 `_proc-use/` 整体排除,导致测试代码在原位置无法被 GitHub 拉取。
+
+**正确位置**: `tests/atdo.test.js`(PLAN4 起)
+
+**设计原则**:
+- ✅ `tests/` 是**正式源代码位置**,纳入 git 跟踪(与 `scripts/` 同级)
+- ✅ GitHub Actions 可自动跑 `bash scripts/test-unit.sh`(无需 `git mv` 历史保留)
+- ❌ 不再放 `_proc-use/reports/`(避免与"运行时报告"语义混淆)
+- ❌ 不放 `scripts/`(避免与"运行时核心代码"混在一起)
+- ❌ 不放 `_proc-use/`(被 .gitignore 排除,CI 不可见)
+
+**atdo.test.js 路径自适配**:内部用 `path.join(__dirname, '../../SKILL.md')`
+从 `tests/` 仍指向项目根,**git mv 后文件内容无需改**。
+
+**`_proc-use/` 仍有效**:只针对运行时过程文件(报告 / 日志 / 审计产物),
+atdo 自身测试代码不属于这一类。
+
 ## Arguments
 
 | Argument | Effect |

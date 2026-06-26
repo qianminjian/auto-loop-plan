@@ -7,7 +7,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TEST_FILE="$SCRIPT_DIR/../_proc-use/reports/atdo.test.js"
+TEST_FILE="$SCRIPT_DIR/../tests/atdo.test.js"
 
 if [ ! -f "$TEST_FILE" ]; then
   echo "[ERROR] 测试文件不存在: $TEST_FILE" >&2

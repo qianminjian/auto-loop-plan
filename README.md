@@ -115,7 +115,8 @@ AUTO_PHASE_NO_CONFIRM=true /atdo plan.md   # 完全无人值守(跳过所有检�
 ## 测试状态
 
 ```bash
-node _proc-use/reports/atdo.test.js
+bash scripts/test-unit.sh        # 推荐入口(自带 --test-timeout)
+node tests/atdo.test.js          # 直接跑(debug 时)
 ```
 
 | 项目 | 数量 |
@@ -136,7 +137,7 @@ node _proc-use/reports/atdo.test.js
 
 启用：`git config core.hooksPath .githooks`
 
-内容：commit 前自动跑 `node _proc-use/reports/atdo.test.js` + `markdownlint-cli2 README.md SKILL.md doc/*.md`。失败拒绝 commit，成功静默通过。
+内容：commit 前自动跑 `bash scripts/test-unit.sh` + `markdownlint-cli2 README.md SKILL.md doc/*.md`。失败拒绝 commit，成功静默通过。
 
 禁用：`git config --unset core.hooksPath`
 
@@ -194,8 +195,8 @@ git config --unset core.hooksPath
 
 | Job | 内容 | 状态 |
 |-----|------|------|
-| Tests (Node 20) | `node _proc-use/reports/atdo.test.js` | 318 pass / 0 fail |
-| Tests (Node 22) | 同上 | 318 pass / 0 fail |
+| Tests (Node 20) | `bash scripts/test-unit.sh` | 379 pass / 0 fail |
+| Tests (Node 22) | 同上 | 379 pass / 0 fail |
 | Markdown Lint | `markdownlint-cli2 README.md SKILL.md doc/*.md` | 0 errors |
 | Shell Lint | `shellcheck scripts/` | 0 errors |
 | Commit Lint | `commitlint` Angular convention + subject ≤ 100 (中文友好) | — |

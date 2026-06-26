@@ -6,12 +6,12 @@
 
 - 物理内存上限:**16G**(本机实测)
 - `node --test` 单进程内存峰值:~200-400MB(纯 JS,无 coverage)
-- 测试规模:318 用例 / 63 套件(`_proc-use/reports/atdo.test.js` 现状)
+- 测试规模:379 用例 / 81 套件(`tests/atdo.test.js` 现状,2026-06-26 PLAN4 迁移后)
 - 残留产物位置:`.phase-execution/state.json.tmp.*` / `.bak.{1,2,3}` / `lock`
 
 ## 禁止的反模式
 
-1. **直接调 `node _proc-use/reports/atdo.test.js` 而不走 `scripts/` 入口** — 易漏 timeout / 清理
+1. **直接调 `node tests/atdo.test.js` 而不走 `scripts/` 入口** — 易漏 timeout / 清理
 2. **并发跑多个 `node --test` 进程** — 内存叠加 ~400MB/进程
 3. **跑完不清理** — `.phase-execution/*.tmp` 残留掩盖状态机异常信号
 4. **不带 `--test-timeout` 的长跑** — hang 时无自动恢复机制
