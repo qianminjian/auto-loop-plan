@@ -955,16 +955,23 @@ node scripts/phase-state.js inc-strike <phaseId> integration
 
 **Code gate checks** (run directly after integration pass):
 ```bash
+# P1-5: 测试入口统一收口到 scripts/ —— 见 .claude/rules/test-discipline.md
+# 注:本项目用 node:test runner(非 jest),findRelatedTests 等价物不存在;
+#     替代:用单测入口(自带 --test-timeout=30000 + 跳过 E2E),agent 不易拼错参数。
+
 # Project lint
 npm run lint 2>&1 || true
 
-# Related tests only (not full suite unless plan says so)
+# 前置清理(规则要求:每次测试后必清残留)
+bash scripts/test-cleanup.sh || true
+
+# 相关测试(若无变更则跳过)—— 改走项目入口,而非直接 node --test
 # CHANGED = 相对 pre-flight 记录的 baseline commit 的所有变更
 # 若 pre-flight 未 commit(可能 baseline = HEAD,即"相对未提交变更")
 # baseline 的具体值由 orchestrator 在 Step 1 记录,此处用 $BASELINE 变量
 CHANGED=$(git diff --name-only ${BASELINE:---} 2>/dev/null || git diff --name-only 2>/dev/null || echo "")
 if [ -n "$CHANGED" ]; then
-  npx jest --findRelatedTests $CHANGED 2>&1 || true
+  bash scripts/test-unit.sh 2>&1 || true
 else
   echo "No changed files detected, skipping related tests"
 fi

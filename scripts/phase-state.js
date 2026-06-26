@@ -18,6 +18,7 @@
  *   node phase-state.js lock                      获取锁
  *   node phase-state.js unlock --reason=<r>       释放锁(Bug-08:必须带 --reason,合法值 all-completed|aborted|alert)
  *   node phase-state.js check-disk                磁盘空间检查
+ *   node phase-state.js check-test-runtime        孤儿 node 测试进程检测(test-discipline)
  *   node phase-state.js sanitize <file>           脱敏文件中的密钥
  *   node phase-state.js heartbeat                 写入心跳
  *   node phase-state.js summary                   输出当前状态摘要
@@ -1285,6 +1286,84 @@ function cmdCheckLockAge() {
   }));
 }
 
+// ─── check-test-runtime ──────────────────────────────────
+// 协议:扫描孤儿 node 测试进程(atdo.test 套件)
+//   与 watchdog.sh 的 gsd-* agent 检测对称 —— 见 .claude/rules/test-discipline.md
+// 设计:
+//   - 用 pgrep 找 cmdline 含 atdo.test 的 node 进程
+//   - 排除自身 + 父进程链上的进程(避免误报)
+//   - 探测 PID 是否仍存活(防止僵尸 PID 假阳性)
+// 退出码:
+//   0 — 无孤儿(clean)
+//   1 — 发现孤儿 + 详细列表
+function cmdCheckTestRuntime() {
+  const { execFileSync } = require('child_process');
+  let rawPids = [];
+  try {
+    // pgrep -f 匹配 cmdline;macOS pgrep 默认 -f 包含参数
+    const out = execFileSync('pgrep', ['-f', 'atdo\\.test'], { encoding: 'utf8' });
+    rawPids = out.trim().split('\n').filter(Boolean).map(Number);
+  } catch (e) {
+    // pgrep exit 1 = no match;其他错误 → 当作无法判定,不阻断
+    if (e.status !== 1) {
+      process.stdout.write(JSON.stringify({
+        orphanCount: 0,
+        orphans: [],
+        warning: false,
+        note: `pgrep 异常 (status=${e.status || 'n/a'}): ${e.message || 'unknown'}`,
+      }));
+      return;
+    }
+    rawPids = [];
+  }
+
+  // 排除自身 + 父进程链
+  const excluded = new Set([process.pid]);
+  let walk = process.ppid;
+  while (walk && walk !== 1 && !excluded.has(walk)) {
+    excluded.add(walk);
+    try {
+      walk = execFileSync('ps', ['-o', 'ppid=', '-p', String(walk)], { encoding: 'utf8' })
+        .trim().split(/\s+/)[0];
+      walk = Number(walk);
+    } catch {
+      break;
+    }
+  }
+
+  // 探测 PID 存活 + 收集详情
+  const alive = [];
+  for (const pid of rawPids) {
+    if (excluded.has(pid)) continue;
+    try {
+      process.kill(pid, 0);  // 信号 0 = 探测存活
+      // 取 cmdline 头 80 字符供调试
+      let cmdline = '';
+      try {
+        cmdline = execFileSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8' }).trim().slice(0, 80);
+      } catch {}
+      alive.push({ pid, cmdline });
+    } catch {
+      // 进程已死(僵尸),不算 orphan
+    }
+  }
+
+  process.stdout.write(JSON.stringify({
+    orphanCount: alive.length,
+    orphans: alive,
+    warning: alive.length > 0,
+  }));
+
+  if (alive.length > 0) {
+    process.stderr.write(`[WARN] 发现 ${alive.length} 个孤儿 node 测试进程(atdo.test):\n`);
+    for (const o of alive) {
+      process.stderr.write(`  pid=${o.pid} cmdline=${o.cmdline}\n`);
+    }
+    process.stderr.write(`建议: bash scripts/test-cleanup.sh 清理\n`);
+    process.exit(1);
+  }
+}
+
 // ─── planHash 对比 (Bug-09 / P2-17) ──────────────────────
 // 协议:state.json 顶层 planHash 是 init 时记录的 plan md5(由用户/上游算好传入)
 //   orchestrator 可选做"当前 plan-file vs state.planHash"对比,纯防御性
@@ -1734,6 +1813,7 @@ const commands = {
   unlock: cmdUnlock,
   'check-disk': () => { process.stdout.write(JSON.stringify(checkDisk())); },
   'check-lock-age': cmdCheckLockAge,  // Bug-08 / P3-24
+  'check-test-runtime': cmdCheckTestRuntime,  // test-discipline rule
   sanitize: cmdSanitize,
   heartbeat: () => { writeHeartbeat(args[0], args[1], args[2]); process.stdout.write(JSON.stringify({ ok: true })); },
   summary: cmdSummary,
