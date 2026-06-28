@@ -1610,6 +1610,193 @@ describe('Bug-06 Manual Gate Protocol 定义 + state schema 扩展', () => {
   });
 });
 
+// ─── atdo-GCR-01: Gate Code Review 状态机 + 命令 ──
+describe('atdo-GCR-01 Gate Code Review', () => {
+  describe('phase-state.js 状态机 gate_review', () => {
+    function freshDir() {
+      return fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-gcr01-'));
+    }
+
+    test('fixed → gate_review 是合法转换', () => {
+      const d = freshDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        runIn(d, 'set-phase', '01', 'in_progress');
+        runIn(d, 'set-phase', '01', 'executed');
+        runIn(d, 'set-phase', '01', 'audited');
+        runIn(d, 'set-phase', '01', 'fixed');
+        const r = runIn(d, 'set-phase', '01', 'gate_review');
+        assert.equal(r.code, 0, r.stderr);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('gate_review → gated 是合法转换', () => {
+      const d = freshDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        runIn(d, 'set-phase', '01', 'in_progress');
+        runIn(d, 'set-phase', '01', 'executed');
+        runIn(d, 'set-phase', '01', 'audited');
+        runIn(d, 'set-phase', '01', 'fixed');
+        runIn(d, 'set-phase', '01', 'gate_review');
+        const r = runIn(d, 'set-phase', '01', 'gated');
+        assert.equal(r.code, 0, r.stderr);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('gate_review → gate_review 是合法转换(fix循环)', () => {
+      const d = freshDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        runIn(d, 'set-phase', '01', 'in_progress');
+        runIn(d, 'set-phase', '01', 'executed');
+        runIn(d, 'set-phase', '01', 'audited');
+        runIn(d, 'set-phase', '01', 'fixed');
+        runIn(d, 'set-phase', '01', 'gate_review');
+        const r = runIn(d, 'set-phase', '01', 'gate_review');
+        assert.equal(r.code, 0, r.stderr);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('gate-review-fail 是终态,不能转换到其他状态', () => {
+      const d = freshDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        // 模拟:通过 inc-gate-review-attempt 达到 3 次进入 gate-review-fail
+        runIn(d, 'set-phase', '01', 'in_progress');
+        runIn(d, 'set-phase', '01', 'executed');
+        runIn(d, 'set-phase', '01', 'audited');
+        runIn(d, 'set-phase', '01', 'fixed');
+        runIn(d, 'set-phase', '01', 'gate_review');
+        runIn(d, 'inc-gate-review-attempt', '01');
+        runIn(d, 'inc-gate-review-attempt', '01');
+        const r = runIn(d, 'inc-gate-review-attempt', '01');
+        assert.match(r.stdout, /"maxed":true/);
+        // 尝试从 gate-review-fail 转换到任何状态都应该失败
+        const r2 = runIn(d, 'set-phase', '01', 'gated');
+        assert.notEqual(r2.code, 0, 'gate-review-fail → gated 应被拒绝');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+  });
+
+  describe('inc-gate-review-attempt 命令', () => {
+    function freshDir() {
+      return fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-gcr01-attempt-'));
+    }
+
+    test('正常累加', () => {
+      const d = freshDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        runIn(d, 'set-phase', '01', 'in_progress');
+        runIn(d, 'set-phase', '01', 'executed');
+        runIn(d, 'set-phase', '01', 'audited');
+        runIn(d, 'set-phase', '01', 'fixed');
+        runIn(d, 'set-phase', '01', 'gate_review');
+
+        const r1 = runIn(d, 'inc-gate-review-attempt', '01');
+        assert.equal(r1.code, 0, r1.stderr);
+        assert.match(r1.stdout, /"gateReviewAttempts":1/);
+        assert.match(r1.stdout, /"maxed":false/);
+
+        const r2 = runIn(d, 'inc-gate-review-attempt', '01');
+        assert.equal(r2.code, 0, r2.stderr);
+        assert.match(r2.stdout, /"gateReviewAttempts":2/);
+        assert.match(r2.stdout, /"maxed":false/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('第3次返回 GATE_REVIEW_FAIL', () => {
+      const d = freshDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        runIn(d, 'set-phase', '01', 'in_progress');
+        runIn(d, 'set-phase', '01', 'executed');
+        runIn(d, 'set-phase', '01', 'audited');
+        runIn(d, 'set-phase', '01', 'fixed');
+        runIn(d, 'set-phase', '01', 'gate_review');
+
+        runIn(d, 'inc-gate-review-attempt', '01');
+        runIn(d, 'inc-gate-review-attempt', '01');
+        const r = runIn(d, 'inc-gate-review-attempt', '01');
+        assert.equal(r.code, 0, r.stderr);
+        assert.match(r.stdout, /"gateReviewAttempts":3/);
+        assert.match(r.stdout, /"maxed":true/);
+        assert.match(r.stdout, /"action":"GATE_REVIEW_FAIL"/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('无 phaseId die', () => {
+      const d = freshDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        const r = runIn(d, 'inc-gate-review-attempt');
+        assert.notEqual(r.code, 0);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+  });
+
+  describe('set-gate-substep / get-gate-substep 命令', () => {
+    function freshDir() {
+      return fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-gcr01-substep-'));
+    }
+
+    test('set-gate-substep 接受有效值', () => {
+      const d = freshDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        const r = runIn(d, 'set-gate-substep', '01', 'gate-code-review');
+        assert.equal(r.code, 0, r.stderr);
+        assert.match(r.stdout, /"ok":true/);
+        assert.match(r.stdout, /"substep":"gate-code-review"/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('set-gate-substep 拒绝无效值', () => {
+      const d = freshDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        const r = runIn(d, 'set-gate-substep', '01', 'invalid-substep');
+        assert.notEqual(r.code, 0, '无效 substep 应被拒绝');
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+
+    test('get-gate-substep 返回正确值', () => {
+      const d = freshDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        runIn(d, 'set-gate-substep', '01', 'gate-code-review');
+        const r = runIn(d, 'get-gate-substep', '01');
+        assert.equal(r.code, 0, r.stderr);
+        assert.match(r.stdout, /"stateSubstep":"gate-code-review"/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+  });
+
+  describe('reset-gate-review-attempts 命令', () => {
+    function freshDir() {
+      return fs.mkdtempSync(path.join(os.tmpdir(), 'atdo-gcr01-reset-'));
+    }
+
+    test('重置计数器为0', () => {
+      const d = freshDir();
+      try {
+        initPlan(d, JSON.stringify({ phases: [{ number: '01', name: 'a' }] }));
+        runIn(d, 'set-phase', '01', 'in_progress');
+        runIn(d, 'set-phase', '01', 'executed');
+        runIn(d, 'set-phase', '01', 'audited');
+        runIn(d, 'set-phase', '01', 'fixed');
+        runIn(d, 'set-phase', '01', 'gate_review');
+        runIn(d, 'inc-gate-review-attempt', '01');
+        runIn(d, 'inc-gate-review-attempt', '01');
+        const r = runIn(d, 'reset-gate-review-attempts', '01');
+        assert.equal(r.code, 0, r.stderr);
+        assert.match(r.stdout, /"gateReviewAttempts":0/);
+      } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    });
+  });
+});
+
 // ─── Bug-08 (P2): lock 持有语义明文化 + unlock 严格化 回归 ──
 // 症状:Phase 01 完成后 lock 仍持久持有,协议没明确"何时释放"。
 // 修复:

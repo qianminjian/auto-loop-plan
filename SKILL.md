@@ -1030,7 +1030,97 @@ fi
 
 Full test suite only if plan explicitly declares it.
 
-Update state: `fixed → gated`
+Update state: `fixed → gate_review` (atdo-GCR-01: gate review 是独立子阶段)
+
+**7.5 Gate Code Review** (gate phases only — atdo-GCR-01)
+
+前置条件:Step 7 集成测试已通过。
+
+**7.5.1 范围**
+- 覆盖"上一个 gate 之后的所有累积变更"(首次 gate 从 baseline 起)
+- 用 `git diff $LAST_GATE_COMMIT --name-only` 获取文件列表
+
+**7.5.2 临时 PR 工作流(/code review 需要 PR)**
+```
+# 1. 创建临时分支
+TEMP_BRANCH="atdo/gate-review-$(date +%s)"
+git checkout -b "$TEMP_BRANCH"
+
+# 2. 推送远程(无远程则跳过 PR 流程)
+git push origin "$TEMP_BRANCH" 2>&1 || {
+  echo "[WARN] 无远程仓库,跳过 PR-based review"
+}
+
+# 3. 创建 PR
+if git remote get-url origin >/dev/null 2>&1; then
+  gh pr create --base main --head "$TEMP_BRANCH" \
+    --title "Gate review phase {N}" \
+    --body "Auto-created for gate code review. Do not merge." 2>&1 || {
+    echo "[WARN] gh 未认证或 PR 创建失败,降级到 diff 扫描"
+  }
+fi
+```
+
+**7.5.3 降级路径**
+若 `gh` 未认证或无远程仓库:
+- 用 `git diff $BASELINE -- name-only` 获取累积变更
+- orchestrator 读取 diff,按 BLOCKER/WARNING 关键词解析扫描结果
+- 作为"快速扫描"模式
+
+**7.5.4 调用 /code review**
+```
+# 若 PR 创建成功
+/code review --pr-url https://github.com/{owner}/{repo}/pull/{N}
+
+# 降级模式
+/code review --diff "$(git diff $BASELINE)"
+```
+
+**7.5.5 解析输出**
+/code review 输出 PR comment。解析 BLOCKER/WARNING:
+```bash
+PR_COMMENT=$(gh pr view {N} --comments --json body 2>/dev/null | jq -r '.[-1].body')
+BLOCKERS=$(echo "$PR_COMMENT" | grep -cP '^\s*[-*]\s+\[BLOCKER\]' || true)
+WARNINGS=$(echo "$PR_COMMENT" | grep -cP '^\s*[-*]\s+\[WARNING\]' || true)
+if [ "$BLOCKERS" -eq 0 ] && [ "$WARNINGS" -eq 0 ]; then
+  echo "GATE_CODE_REVIEW_PASS"
+else
+  echo "BLOCKERS=$BLOCKERS WARNINGS=$WARNINGS"
+fi
+```
+
+**7.5.6 Fix Loop(最多 3 次,仅修复 BLOCKER)**
+/code review 报告的 BLOCKER 必须全部修复;WARNING 仅记录,不阻塞通过。
+Attempt 1: gsd-code-fixer → git add/commit/push → re-run /code review
+Attempt 2: gsd-code-fixer → git add/commit/push → re-run /code review
+Attempt 3: git checkout -- `<files>` (回滚) + ALERT.md + EXIT
+
+追踪:
+```bash
+node scripts/phase-state.js inc-gate-review-attempt <phaseId>
+# attempt >= 3 → gate-review-fail 终态 + ALERT
+```
+
+状态迁移:
+- `gate_review → gate_review` (fix 循环中)
+- `gate_review → gated` (review 通过:0 BLOCKER + 0 WARNING)
+- `gate_review → gate-review-fail` (attempt ≥ 3)
+
+**7.5.7 子步骤心跳**
+每个子步骤开始时写入:
+```bash
+node scripts/phase-state.js set-gate-substep <phaseId> gate-code-review
+node scripts/phase-state.js heartbeat <phaseId> "gate-code-review" "active"
+```
+
+**7.5.8 清理**
+```bash
+# 关闭并删除临时 PR
+if [ -n "$TEMP_PR_NUMBER" ]; then
+  gh pr close "$TEMP_PR_NUMBER" --delete-branch 2>/dev/null || true
+fi
+git checkout main 2>/dev/null || git checkout master 2>/dev/null || true
+```
 
 **8. Git Commit 规则 (按阶段类型区分)**
 
@@ -1044,7 +1134,7 @@ Update state: `fixed → gated`
 ### 8.1 Gate Phase (质量关口) — orchestrator 强制在 phase 收尾 commit
 
 - 触发条件:plan 中 `is_gate: true` / `gate: true` / 每隔一个阶段 / **最终阶段恒为 Gate** (Step 6 Gate Detection)
-- commit 时机:Step 7 (Gate Integration Test) 通过后,Step 8 收尾强制 commit
+- commit 时机:Step 7 (Gate Integration Test) + Step 7.5 (Gate Code Review) 全部通过后,Step 8 收尾强制 commit
 - commit 主体:**orchestrator**(本协议运行方),不在 agent spawn prompt 中要求 agent commit
 - commit 粒度:1 个 phase = 1 个 commit 块(可能含 agent 内部已产的多个 commit + orchestrator 的 gate summary commit)
 - 安全检查:见下方 §8.3
@@ -1401,13 +1491,15 @@ continue   │
 }
 ```
 
-**3a. 新增 phase status(Bug-06)**
+**3a. 新增 phase status(Bug-06 / atdo-GCR-01)**
 
 | Status | 进入来源 | 离开目标 | 语义 |
 |--------|---------|---------|------|
 | `awaiting_user_review` | `gated` (manual/hybrid gate) | `user-review-pass` / `user-review-fail` | orchestrator 已发起 AskUserQuestion,等用户答复 |
 | `user-review-pass` | `awaiting_user_review` | `completed` | 用户签字通过 |
 | `user-review-fail` | `awaiting_user_review` | (终态) | 用户判定不通过,触发 ALERT |
+| `gate_review` | `fixed` (gate phase) | `gated` / `gate_review` | atdo-GCR-01: gate code review 进行中(含 fix 循环) |
+| `gate-review-fail` | `gate_review` (3次失败) | (终态) | atdo-GCR-01: gate review 3次失败,触发 ALERT |
 
 **3b. 状态机合法转换表**(phase-state.js 校验,跳过任何中间态 → FATAL)
 
@@ -1417,12 +1509,14 @@ in_progress          → executed
 executed             → audited | verified       (P1-4: verification phase 可走 verified)
 audited              → fixed
 verified             → gated                    (P1-4: verification → gated 直通)
-fixed                → gated
+fixed                → gated | gate_review     (atdo-GCR-01: 非gate→gated;gate→gate_review)
+gate_review          → gated | gate_review     (atdo-GCR-01: review通过→gated;fix循环→自身)
 gated                → completed              (auto gate 直通)
 gated                → awaiting_user_review   (manual/hybrid gate 入口)
 awaiting_user_review → user-review-pass | user-review-fail
 user-review-pass     → completed
 user-review-fail     → (终态,ALERT)
+gate-review-fail     → (终态,ALERT)           (atdo-GCR-01: gate review 3次失败)
 completed            → (终态)
 ```
 

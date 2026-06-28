@@ -59,8 +59,11 @@ const VALID_STATUSES = [
   'awaiting_user_review', 'user-review-pass', 'user-review-fail',
   // P1-4:verification phase 快速路径(跳过 audited/fixed,见 SKILL.md "Verification Phase")
   'verified',
+  // atdo-GCR-01:Gate Code Review 专用状态
+  'gate_review',        // gate review 进行中(含 fix 循环)
+  'gate-review-fail',   // gate review 3次失败后终态
 ];
-const ACTIVE_STATUSES = ['pending', 'in_progress', 'executed', 'audited', 'fixed', 'gated', 'awaiting_user_review', 'verified'];
+const ACTIVE_STATUSES = ['pending', 'in_progress', 'executed', 'audited', 'fixed', 'gated', 'awaiting_user_review', 'verified', 'gate_review'];
 // P2-15: 同一 phase 最多累积的确认条数(防 LLM 幻觉 / 恶意循环调用导致 state.json 爆炸)
 const MAX_CONFIRMATIONS_PER_PHASE = 10;
 const STRIKE_THRESHOLDS = { phaseRetry: 3, regression: 2, sameCategory: 5 };
@@ -81,13 +84,16 @@ const ALLOWED_TRANSITIONS = {
   'in_progress':          ['executed'],
   'executed':             ['audited', 'verified'],  // P1-4: verification phase 可跳过 audited
   'audited':              ['fixed'],
-  'fixed':                ['gated'],
-  'verified':             ['gated'],                // P1-4: verification → gated 直通
+  'fixed':                ['gated', 'gate_review'],  // atdo-GCR-01: 非gate→gated;gate→gate_review(下一步→gated)
+  'verified':             ['gated'],                 // P1-4: verification → gated 直通
+  // atdo-GCR-01:Gate Code Review 流程
+  'gate_review':           ['gated', 'gate_review'], // 通过 → gated;fix循环中 → 自身
+  // Bug-06:manual gate 流程
   'gated':                ['completed', 'awaiting_user_review'],  // auto → completed;manual → awaiting_user_review
-  // Bug-06:manual gate 流程(gated 进入 manual gate 后必须经此路径离开)
   'awaiting_user_review': ['user-review-pass', 'user-review-fail'],
   'user-review-pass':     ['completed'],
   // 'user-review-fail' 终态:失败 ALERT,不向其他状态转换
+  // 'gate-review-fail' 终态:gate review 3次失败,不向其他状态转换
   // 'completed' 终态:不向其他状态转换
 };
 
@@ -104,7 +110,7 @@ const VALID_PREDECESSORS = (() => {
 })();
 
 // 终态:不允许 set-phase 离开这些状态
-const TERMINAL_STATUSES = ['completed', 'user-review-fail'];
+const TERMINAL_STATUSES = ['completed', 'user-review-fail', 'gate-review-fail'];
 
 // 把合法转换表格式化为可读字符串(供 FATAL 消息使用)
 function formatTransitionTable() {
@@ -2053,7 +2059,7 @@ function cmdAdvancePhase() {
   if (!phase) die(`phase ${phaseId} 不存在`);
 
   // 边界：终态 / manual gate 中 → die
-  if (['completed', 'user-review-fail', 'awaiting_user_review'].includes(phase.status)) {
+  if (['completed', 'user-review-fail', 'gate-review-fail', 'awaiting_user_review'].includes(phase.status)) {
     die(`phase ${phaseId} 当前 status="${phase.status}"，不可 advance（终态或 manual gate 中）`);
   }
 
@@ -2114,6 +2120,127 @@ function cmdAdvancePhase() {
   }));
 }
 
+// ─── Gate Code Review 命令 (atdo-GCR-01) ─────────────────────────────
+
+const VALID_GATE_SUBSTEPS = ['gate-integration-test', 'gate-code-review', 'gate-fix', 'gate-commit'];
+
+function cmdIncGateReviewAttempt() {
+  const state = readState();
+  const phaseId = args[0];
+  if (!phaseId) die('inc-gate-review-attempt 需要 phaseId');
+
+  const phase = state.phases.find(p => p.number === phaseId);
+  if (!phase) die(`阶段 ${phaseId} 不存在`);
+
+  // 初始化或递增 gate review attempt 计数器
+  if (!phase.gateReviewAttempts) phase.gateReviewAttempts = 0;
+  phase.gateReviewAttempts++;
+  state.updatedAt = new Date().toISOString();
+  writeState(state);
+
+  const maxed = phase.gateReviewAttempts >= 3;
+  if (maxed) {
+    // 达到 3 次 → 进入终态 gate-review-fail
+    phase.status = 'gate-review-fail';
+    phase.statusSince = new Date().toISOString();
+    phase.gateReviewAttempts = 3; // 锁定为 3
+    writeState(state);
+    const alertBlock = [
+      '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+      '⚠️  [atdo ALERT] Gate Code Review 3次失败 — 进入终态 gate-review-fail',
+      '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+      `阶段: ${phaseId}`,
+      `gateReviewAttempts: ${phase.gateReviewAttempts}/3`,
+      '',
+      '建议行动:检查代码质量问题的根因,可能需要人工介入或取消该 gate',
+      '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+    ].join('\n');
+    process.stderr.write(alertBlock + '\n');
+  }
+
+  process.stdout.write(JSON.stringify({
+    phaseId,
+    gateReviewAttempts: phase.gateReviewAttempts,
+    maxed,
+    action: maxed ? 'GATE_REVIEW_FAIL' : 'RETRY',
+  }));
+}
+
+function cmdSetGateSubstep() {
+  const phaseId = args[0];
+  const substep = args[1];
+  if (!phaseId) die('set-gate-substep 需要 phaseId');
+  if (!substep) die('set-gate-substep 需要 substep');
+
+  if (!VALID_GATE_SUBSTEPS.includes(substep)) {
+    die(`set-gate-substep: 无效 substep "${substep}",有效值: ${VALID_GATE_SUBSTEPS.join(', ')}`);
+  }
+
+  // 写入 heartbeat.json
+  if (fs.existsSync(HEARTBEAT_FILE)) {
+    try {
+      const hb = JSON.parse(fs.readFileSync(HEARTBEAT_FILE, 'utf8'));
+      hb.currentGateSubstep = substep;
+      hb.gateSubstepSince = new Date().toISOString();
+      fs.writeFileSync(HEARTBEAT_FILE, JSON.stringify(hb, null, 2), 'utf8');
+    } catch (e) {
+      process.stderr.write(`[WARN] set-gate-substep 写 heartbeat.json 失败: ${e.message}\n`);
+    }
+  }
+
+  // 同时持久化到 state.json（跨会话恢复）
+  const state = readStateSafe() || {};
+  if (!state.gateSubsteps) state.gateSubsteps = {};
+  state.gateSubsteps[phaseId] = { substep, since: new Date().toISOString() };
+  writeState(state);
+
+  process.stdout.write(JSON.stringify({ ok: true, phaseId, substep }));
+}
+
+function cmdGetGateSubstep() {
+  const phaseId = args[0];
+  if (!phaseId) die('get-gate-substep 需要 phaseId');
+
+  const state = readStateSafe();
+  const stateInfo = state?.gateSubsteps?.[phaseId];
+
+  // 同时读 live heartbeat
+  let heartbeatSubstep = null;
+  let heartbeatSince = null;
+  if (fs.existsSync(HEARTBEAT_FILE)) {
+    try {
+      const hb = JSON.parse(fs.readFileSync(HEARTBEAT_FILE, 'utf8'));
+      heartbeatSubstep = hb.currentGateSubstep || null;
+      heartbeatSince = hb.gateSubstepSince || null;
+    } catch {}
+  }
+
+  process.stdout.write(JSON.stringify({
+    phaseId,
+    stateSubstep: stateInfo?.substep || null,
+    stateSubstepSince: stateInfo?.since || null,
+    heartbeatSubstep,
+    heartbeatSince,
+  }));
+}
+
+function cmdResetGateReviewAttempts() {
+  const state = readState();
+  const phaseId = args[0];
+  if (!phaseId) die('reset-gate-review-attempts 需要 phaseId');
+
+  const phase = state.phases.find(p => p.number === phaseId);
+  if (!phase) die(`阶段 ${phaseId} 不存在`);
+
+  if (phase.gateReviewAttempts) {
+    phase.gateReviewAttempts = 0;
+    state.updatedAt = new Date().toISOString();
+    writeState(state);
+  }
+
+  process.stdout.write(JSON.stringify({ ok: true, phaseId, gateReviewAttempts: 0 }));
+}
+
 // ─── 入口 ────────────────────────────────────────────────
 
 const commands = {
@@ -2131,6 +2258,10 @@ const commands = {
   'proxy-recovery-decision': cmdProxyRecoveryDecision,  // atdo-003 P1
   'check-workspace': cmdCheckWorkspace,  // atdo-001 P2
   'advance-phase': cmdAdvancePhase,  // atdo-004 P2
+  'inc-gate-review-attempt': cmdIncGateReviewAttempt,  // atdo-GCR-01
+  'set-gate-substep': cmdSetGateSubstep,  // atdo-GCR-01
+  'get-gate-substep': cmdGetGateSubstep,  // atdo-GCR-01
+  'reset-gate-review-attempts': cmdResetGateReviewAttempts,  // atdo-GCR-01
   'compare-plan-hash': cmdComparePlanHash,  // Bug-09 / P2-17
   'set-project-dirs': cmdSetProjectDirs,  // project temp dir config
   'get-project-dirs': cmdGetProjectDirs,  // query project dir config
