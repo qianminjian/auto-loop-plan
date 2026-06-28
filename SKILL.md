@@ -40,6 +40,40 @@ Agent execution may change shell cwd. To prevent "No such file or directory" err
 - All CI scripts MUST derive their own `SCRIPT_DIR` and work relative to it — never rely on `$PWD`.
 - Before each Step (0-9), the orchestrator MUST verify: `[ "$(pwd)" = "$PROJECT_ROOT" ]` or `cd "$PROJECT_ROOT"`.
 
+### 执行流程总览
+
+```mermaid
+flowchart TD
+  Start([Plan 输入]) --> PreFlight[Step 0: Pre-flight<br/>记录 baseline,校验 plan]
+  PreFlight --> Execute[Step 1: Agent 执行<br/>gsd-executor → AUTO-EXEC-RESULT]
+  Execute --> Verify[Step 2: 独立验证<br/>orchestrator 直接执行]
+  Verify --> Audit{--audit?<br/>默认 off}
+  Audit -->|yes| Step4[Step 3: Agent Audit<br/>gsd-code-reviewer]
+  Audit -->|no| SkipAudit[跳过 Step 3<br/>直接 set-phase audited]
+  Step4 --> FixLoop{有 BLOCKER?}
+  FixLoop -->|yes| Fix[Step 4: Fix Loop<br/>gsd-code-fixer ≤3 次]
+  Fix --> Execute
+  FixLoop -->|no| GateCheck{是 gate phase?}
+  SkipAudit --> GateCheck
+  GateCheck -->|yes| GateIT[Step 6: Gate IT<br/>gsd-integration-checker]
+  GateCheck -->|no| Commit[Step 7: Commit<br/>orchestrator 强制 commit]
+  GateIT --> GateCR{需要<br/>Gate Review?}
+  GateIT -->|no| Commit
+  GateCR -->|yes| GateReview[Step 7.5: Gate CR<br/>/code review + fix ≤3]
+  GateCR -->|no| Commit
+  GateReview -->|通过| Commit
+  GateReview -->|失败| AlertReview[gate-review-fail<br/>终态 ALERT]
+  Fix --> Audit
+  GateIT -->|失败| GateFix[Gate Fix Loop<br/>≤3 次]
+  GateFix --> GateIT
+  Commit --> NextPhase{还有<br/>下一 phase?}
+  NextPhase -->|yes| PreFlight
+  NextPhase -->|no| Done([完成])
+  AlertReview --> Done
+```
+
+**每 turn 只执行一个 phase;跨 turn 通过 CronCreate 续航。**
+
 ### Process File Containment Policy (PROJECT POLICY)
 
 > Defines the constant **`PROCESS_FILE_POLICY`**, prepended to the task
@@ -807,7 +841,7 @@ Success criteria: {criteria}
 Constraints: Work ONLY in {projectRoot}. Do NOT read .env files. Do NOT output secrets.
 
 After completing your task, output EXACTLY this line:
-[AUTO-EXEC-RESULT: status=SUCCESS|FAILED, methodology=proxy|real|mixed, files=<count>, tasks_done=<count>, errors=<count>]
+[AUTO-EXEC-RESULT: status=SUCCESS|FAILED, methodology=proxy|real|mixed, files=<count>, tasks_done=<count>, errors=<count>, commits=<hash1,hash2,...>]
 ```
 
 **methodology 字段(强制)— 标识 agent 实际使用的测试/验证方法学:**
@@ -829,6 +863,11 @@ After agent returns:
 - **methodology 字段校验(强制)**:从 marker 提取 `methodology=...`,必须是 `proxy|real|mixed` 之一;缺失或非法值 → 视为 FAILED,触发 fix loop 要求 agent 重报(不静默放行)
 - **proxy 报告处理(Bug-05 核心)**:若 `methodology=proxy` → 暂停 gate 流程,**不允许按 agent 报告的 SUCCESS/PASS 自行通过 gate**;输出警告 "⚠️ Gate X proxy-only, requires human sign-off or real validation",将 phase 标为 INCONCLUSIVE(等同"待人工放行或 real 验证")。**proxy 测试不构成 gate 通过的充分证据**——orchestrator 必须显式要求人工放行(由用户/上游确认)或 agent 重跑 real 验证后,才能进入下一阶段。**标准恢复流程见 §Proxy Recovery Protocol (atdo-003)**,用命令 `proxy-recovery-decision <id> auto-pass|manual-required` 固化决策
 - No marker found → treat as AGENT_OUTPUT_INCOMPLETE, retry once with shorter prompt
+- **commits 字段提取**:从 marker 提取 `commits=<hash1,hash2,...>`;若存在则批量记录:
+  ```bash
+  node scripts/phase-state.js record-commit <phaseId> <hash1> [hash2 ...]
+  ```
+  (注:commits 字段格式兼容单 hash 或逗号分隔多 hash,命令自动处理两种输入)
 - Update state: `executed`
 
 **3. Independent Verification** (orchestrator direct execution, NOT Agent)
@@ -932,7 +971,7 @@ Constraints: Make MINIMAL targeted changes only. Do NOT refactor surrounding
 code. Do NOT change unrelated files. Verify each fix with a syntax check
 before declaring done.
 
-Output: [AUTO-EXEC-RESULT: status=SUCCESS|FAILED, methodology=proxy|real|mixed, fixes_applied=<count>, files_changed=<count>]
+Output: [AUTO-EXEC-RESULT: status=SUCCESS|FAILED, methodology=proxy|real|mixed, fixes_applied=<count>, files_changed=<count>, commits=<hash1,hash2,...>]
 ```
 
 Then re-audit. Strike tracking:
@@ -941,6 +980,21 @@ Attempt 1: gsd-code-fixer → re-audit
 Attempt 2: gsd-code-fixer → re-audit
 Attempt 3: git checkout -- <files>  (rollback to pre-fix state) + ALERT.md + EXIT
 ```
+
+**methodology=proxy 时的 Fix Loop 行为**:
+若 `gsd-code-fixer` 报告 `methodology=proxy`:
+1. **不允许自动接受 fix 结果**——proxy fix 不构成 BLOCKER 已修复的充分证据
+2. orchestrator 须运行 5 维 real 验证生成 `evidence.json`:
+   - 维度 1: 真实编译/语法检查
+   - 维度 2: 真实单测（如有）
+   - 维度 3: 手动代码审查（LLM 或人工）
+   - 维度 4: diff 分析（改动范围合理）
+   - 维度 5: 回归扫描（未引入新问题）
+3. 写 `evidence.json` 到 `.phase-execution/phases/<id>/evidence.json`
+4. 调 `node scripts/phase-state.js proxy-recovery-decision <phaseId> <auto-pass|manual-required>`
+5. 若 `manual-required` → 输出警告并暂停，等待人工确认
+
+**注意**:Fix Loop 内 agent 自举（gsd-code-fixer 报告 methodology=proxy）是**正常现象**。重要的是 orchestrator 不接受 proxy 声明作为最终通过证据——必须升级到 real 验证。
 
 Track strikes:
 ```bash
@@ -975,7 +1029,7 @@ Write report to .phase-execution/gates/gate-{label}/integration-test-report.md
 (NOTE: atdo runtime report path — exempt from the _proc-use/ rule above).
 Use template at ~/.agents/skills/atdo/references/templates/integration-test-report-template.md.
 
-Output: [AUTO-EXEC-RESULT: status=SUCCESS|FAILED, methodology=proxy|real|mixed, integration_errors=<count>]
+Output: [AUTO-EXEC-RESULT: status=SUCCESS|FAILED, methodology=proxy|real|mixed, integration_errors=<count>, commits=<hash1,hash2,...>]
 ```
 
 After agent returns:
@@ -990,6 +1044,17 @@ After agent returns:
     # → 重 spawn 回到本 Step 7 起点
   fi
   ```
+- **commits 字段提取**:从 marker 提取 `commits=<hash1,hash2,...>`;若存在则批量记录:
+  ```bash
+  node scripts/phase-state.js record-commit <phaseId> <hash1> [hash2 ...]
+  ```
+- **methodology=proxy 时的 Gate Integration Test 行为**:
+  若 `gsd-integration-checker` 报告 `methodology=proxy`:
+  1. **不允许自动接受测试结果**——proxy integration test 不构成集成通过的充分证据
+  2. orchestrator 须运行 5 维 real 验证生成 `evidence.json`（同 Step 5 Fix Loop 规范）
+  3. 写 `evidence.json` 到 `.phase-execution/gates/<label>/evidence.json`
+  4. 调 `node scripts/phase-state.js proxy-recovery-decision <phaseId> <auto-pass|manual-required>`
+  5. 若 `manual-required` → 输出警告并暂停,等待人工确认
 
 If integration failures → gate fix loop (max 3 attempts):
 ```
@@ -1030,7 +1095,97 @@ fi
 
 Full test suite only if plan explicitly declares it.
 
-Update state: `fixed → gated`
+Update state: `fixed → gate_review` (atdo-GCR-01: gate review 是独立子阶段)
+
+**7.5 Gate Code Review** (gate phases only — atdo-GCR-01)
+
+前置条件:Step 7 集成测试已通过。
+
+**7.5.1 范围**
+- 覆盖"上一个 gate 之后的所有累积变更"(首次 gate 从 baseline 起)
+- 用 `git diff $LAST_GATE_COMMIT --name-only` 获取文件列表
+
+**7.5.2 临时 PR 工作流(/code review 需要 PR)**
+```
+# 1. 创建临时分支
+TEMP_BRANCH="atdo/gate-review-$(date +%s)"
+git checkout -b "$TEMP_BRANCH"
+
+# 2. 推送远程(无远程则跳过 PR 流程)
+git push origin "$TEMP_BRANCH" 2>&1 || {
+  echo "[WARN] 无远程仓库,跳过 PR-based review"
+}
+
+# 3. 创建 PR
+if git remote get-url origin >/dev/null 2>&1; then
+  gh pr create --base main --head "$TEMP_BRANCH" \
+    --title "Gate review phase {N}" \
+    --body "Auto-created for gate code review. Do not merge." 2>&1 || {
+    echo "[WARN] gh 未认证或 PR 创建失败,降级到 diff 扫描"
+  }
+fi
+```
+
+**7.5.3 降级路径**
+若 `gh` 未认证或无远程仓库:
+- 用 `git diff $BASELINE -- name-only` 获取累积变更
+- orchestrator 读取 diff,按 BLOCKER/WARNING 关键词解析扫描结果
+- 作为"快速扫描"模式
+
+**7.5.4 调用 /code review**
+```
+# 若 PR 创建成功
+/code review --pr-url https://github.com/{owner}/{repo}/pull/{N}
+
+# 降级模式
+/code review --diff "$(git diff $BASELINE)"
+```
+
+**7.5.5 解析输出**
+/code review 输出 PR comment。解析 BLOCKER/WARNING:
+```bash
+PR_COMMENT=$(gh pr view {N} --comments --json body 2>/dev/null | jq -r '.[-1].body')
+BLOCKERS=$(echo "$PR_COMMENT" | grep -cP '^\s*[-*]\s+\[BLOCKER\]' || true)
+WARNINGS=$(echo "$PR_COMMENT" | grep -cP '^\s*[-*]\s+\[WARNING\]' || true)
+if [ "$BLOCKERS" -eq 0 ]; then
+  echo "GATE_CODE_REVIEW_PASS"
+else
+  echo "BLOCKERS=$BLOCKERS WARNINGS=$WARNINGS"
+fi
+```
+
+**7.5.6 Fix Loop(最多 3 次,仅修复 BLOCKER)**
+/code review 报告的 BLOCKER 必须全部修复;WARNING 仅记录,不阻塞通过。
+Attempt 1: gsd-code-fixer → git add/commit/push → re-run /code review
+Attempt 2: gsd-code-fixer → git add/commit/push → re-run /code review
+Attempt 3: git checkout -- `<files>` (回滚) + ALERT.md + EXIT
+
+追踪:
+```bash
+node scripts/phase-state.js inc-gate-review-attempt <phaseId>
+# attempt >= 3 → gate-review-fail 终态 + ALERT
+```
+
+状态迁移:
+- `gate_review → gate_review` (fix 循环中)
+- `gate_review → gated` (review 通过:BLOCKERS==0; WARNING 仅记录,不阻塞)
+- `gate_review → gate-review-fail` (attempt ≥ 3)
+
+**7.5.7 子步骤心跳**
+每个子步骤开始时写入:
+```bash
+node scripts/phase-state.js set-gate-substep <phaseId> gate-code-review
+node scripts/phase-state.js heartbeat <phaseId> "gate-code-review" "active"
+```
+
+**7.5.8 清理**
+```bash
+# 关闭并删除临时 PR
+if [ -n "$TEMP_PR_NUMBER" ]; then
+  gh pr close "$TEMP_PR_NUMBER" --delete-branch 2>/dev/null || true
+fi
+git checkout main 2>/dev/null || git checkout master 2>/dev/null || true
+```
 
 **8. Git Commit 规则 (按阶段类型区分)**
 
@@ -1044,7 +1199,7 @@ Update state: `fixed → gated`
 ### 8.1 Gate Phase (质量关口) — orchestrator 强制在 phase 收尾 commit
 
 - 触发条件:plan 中 `is_gate: true` / `gate: true` / 每隔一个阶段 / **最终阶段恒为 Gate** (Step 6 Gate Detection)
-- commit 时机:Step 7 (Gate Integration Test) 通过后,Step 8 收尾强制 commit
+- commit 时机:Step 7 (Gate Integration Test) + Step 7.5 (Gate Code Review) 全部通过后,Step 8 收尾强制 commit
 - commit 主体:**orchestrator**(本协议运行方),不在 agent spawn prompt 中要求 agent commit
 - commit 粒度:1 个 phase = 1 个 commit 块(可能含 agent 内部已产的多个 commit + orchestrator 的 gate summary commit)
 - 安全检查:见下方 §8.3
@@ -1401,30 +1556,59 @@ continue   │
 }
 ```
 
-**3a. 新增 phase status(Bug-06)**
+**3a. 新增 phase status(Bug-06 / atdo-GCR-01)**
 
 | Status | 进入来源 | 离开目标 | 语义 |
 |--------|---------|---------|------|
 | `awaiting_user_review` | `gated` (manual/hybrid gate) | `user-review-pass` / `user-review-fail` | orchestrator 已发起 AskUserQuestion,等用户答复 |
 | `user-review-pass` | `awaiting_user_review` | `completed` | 用户签字通过 |
 | `user-review-fail` | `awaiting_user_review` | (终态) | 用户判定不通过,触发 ALERT |
+| `gate_review` | `fixed` (gate phase) | `gated` / `gate_review` | atdo-GCR-01: gate code review 进行中(含 fix 循环) |
+| `gate-review-fail` | `gate_review` (3次失败) | (终态) | atdo-GCR-01: gate review 3次失败,触发 ALERT |
 
-**3b. 状态机合法转换表**(phase-state.js 校验,跳过任何中间态 → FATAL)
+**3b. 状态机转换图**(mermaid,phase-state.js 校验)
 
+```mermaid
+stateDiagram-v2
+  [*] --> pending
+  pending --> in_progress
+  in_progress --> executed
+  executed --> audited : standard path
+  executed --> verified : verification phase (P1-4)
+  audited --> fixed
+  fixed --> gated : non-gate phase
+  fixed --> gate_review : gate phase (atdo-GCR-01)
+  verified --> gated : P1-4 verification 直通
+  gate_review --> gated : review 通过(BLOCKERS==0)
+  gate_review --> gate_review : fix 循环(最多 3 次)
+  gate_review --> gate_review_fail : attempt ≥ 3
+  gated --> completed : auto gate
+  gated --> awaiting_user_review : manual/hybrid gate
+  awaiting_user_review --> user_review_pass : 用户通过
+  awaiting_user_review --> user_review_fail : 用户拒绝
+  completed --> [*]
+  user_review_fail --> [*] : 终态,ALERT
+  gate_review_fail --> [*] : 终态,ALERT
 ```
-pending              → in_progress
-in_progress          → executed
-executed             → audited | verified       (P1-4: verification phase 可走 verified)
-audited              → fixed
-verified             → gated                    (P1-4: verification → gated 直通)
-fixed                → gated
-gated                → completed              (auto gate 直通)
-gated                → awaiting_user_review   (manual/hybrid gate 入口)
-awaiting_user_review → user-review-pass | user-review-fail
-user-review-pass     → completed
-user-review-fail     → (终态,ALERT)
-completed            → (终态)
-```
+
+**转换表对照**(线性表达,与上图等价):
+
+| from | to | 说明 |
+|------|----|------|
+| pending | in_progress | 启动 |
+| in_progress | executed | 阶段执行完成 |
+| executed | audited / verified | 审计/验证 |
+| audited | fixed | 修复完成 |
+| fixed | gated / gate_review | non-gate 直通;gate 进 review |
+| verified | gated | P1-4 快速路径 |
+| gate_review | gated / gate_review | 通过/fix循环 |
+| gate_review | gate-review-fail | 3次失败终态 |
+| gated | completed / awaiting_user_review | auto/manual |
+| awaiting_user_review | user-review-pass / user-review-fail | 人工决定 |
+| user-review-pass | completed | |
+| user-review-fail | (终态) | ALERT |
+| gate-review-fail | (终态) | ALERT |
+| completed | (终态) | |
 
 ### Plan Conversion Protocol (P2-1)
 
@@ -2156,38 +2340,73 @@ Example:
 
 ## Utilities Reference
 
-All scripts are in the `scripts/` directory of this skill. Run from your project root:
+All scripts are in the `scripts/` directory of this skill. Run from your project root.
+**共 37 个命令**（phase-state.js 30 个 + watchdog.sh 3 个 + test wrappers 4 个）:
 
 ```bash
-# State management
-node ~/.agents/skills/atdo/scripts/phase-state.js init    # Initialize state (reads JSON from stdin)
-node ~/.agents/skills/atdo/scripts/phase-state.js get [key]               # Read state
-node ~/.agents/skills/atdo/scripts/phase-state.js get-current-phase       # Get pending phase
-node ~/.agents/skills/atdo/scripts/phase-state.js set-phase <id> <status> # Update phase status
-node ~/.agents/skills/atdo/scripts/phase-state.js inc-strike <id> <type>  # Increment strike
-node ~/.agents/skills/atdo/scripts/phase-state.js get-strikes [phaseId]  # Query strike counts
-node ~/.agents/skills/atdo/scripts/phase-state.js record-commit <id> <h[,h,...]>  # Record commit hash(es),comma-separated supported
-node ~/.agents/skills/atdo/scripts/phase-state.js record-confirm <phaseId> <c|s|a> # Record user confirmation (Bug-07)
-node ~/.agents/skills/atdo/scripts/phase-state.js has-confirm <phaseId>           # Check if phase confirmed (Bug-07, LIFO)
-node ~/.agents/skills/atdo/scripts/phase-state.js summary                 # State summary
-node ~/.agents/skills/atdo/scripts/phase-state.js validate-summary <phaseId>  # Validate summary.md length (Bug-10, ≤500 chars)
-node ~/.agents/skills/atdo/scripts/phase-state.js generate-summary-template <phaseId>  # Output summary.md template (P3-4)
+# ── State management (14 commands) ──────────────────────────────────────
+node phase-state.js init <plan-json>                      # Initialize state (JSON from stdin)
+node phase-state.js get [key]                             # Read state field
+node phase-state.js set-phase <id> <status>               # Update phase status
+node phase-state.js get-current-phase                    # Get current pending phase
+node phase-state.js advance-phase <id> [--to=<status>]  # Auto-advance to target (atdo-004)
+node phase-state.js inc-strike <id> <type>               # Increment strike (type: fix|execution|integration|slow-heartbeat|regression)
+node phase-state.js get-strikes [id]                     # Query strike counts
+node phase-state.js record-commit <id> <h[,h,...]>    # Record commit hash(es)
+node phase-state.js record-confirm <id> <c|s|a>          # Record user confirmation (Bug-07)
+node phase-state.js has-confirm <id>                     # Check if phase confirmed (exit 0/1)
+node phase-state.js summary                              # State summary
+node phase-state.js validate-summary <id>               # Validate summary.md ≤500 chars (exit 0/1/2)
+node phase-state.js generate-summary-template <id>        # Output summary.md template
+node phase-state.js compare-plan-hash <plan-file>        # Compare plan md5 vs state.planHash
 
-# Safety
-node ~/.agents/skills/atdo/scripts/phase-state.js lock                                                      # 获取锁
-node ~/.agents/skills/atdo/scripts/phase-state.js unlock --reason=all-completed|aborted|alert            # 释放锁(Bug-08)
-node ~/.agents/skills/atdo/scripts/phase-state.js check-disk              # Disk space check
-node ~/.agents/skills/atdo/scripts/phase-state.js check-lock-age          # Check lock age & warn if > 24h (P3-24)
-node ~/.agents/skills/atdo/scripts/phase-state.js sanitize <file>         # Redact secrets
-node ~/.agents/skills/atdo/scripts/phase-state.js heartbeat <p> <t> <s>   # Write heartbeat
+# ── Gate Code Review — atdo-GCR-01 (4 commands) ────────────────────────
+node phase-state.js inc-gate-review-attempt <id>         # Increment attempt (≥3 → gate-review-fail)
+node phase-state.js set-gate-substep <id> <substep>     # Set gate substep (gate-integration-test|gate-code-review|gate-fix|gate-commit)
+node phase-state.js get-gate-substep <id>               # Get current gate substep
+node phase-state.js reset-gate-review-attempts <id>    # Reset attempt counter to 0
 
-# Plan integrity
-node ~/.agents/skills/atdo/scripts/phase-state.js compare-plan-hash <plan-file>  # Compare plan file md5 vs state.planHash (P2-17)
+# ── Safety & lock (5 commands) ─────────────────────────────────────────
+node phase-state.js lock                                # Acquire lock (O_EXCL atomic, P0-H fix)
+node phase-state.js unlock --reason=all-completed|aborted|alert  # Release lock
+node phase-state.js check-lock-age                      # Warn if lock > 24h (Bug-08)
+node phase-state.js check-disk [minMB]                  # Disk space check (≥500MB default)
+node phase-state.js check-test-runtime                 # Detect orphan node --test processes
 
-# Watchdog
-bash ~/.agents/skills/atdo/scripts/watchdog.sh cleanup                    # Kill orphan agents
-bash ~/.agents/skills/atdo/scripts/watchdog.sh check-heartbeat            # Check heartbeat timeout
-bash ~/.agents/skills/atdo/scripts/watchdog.sh kill-stale <pid>           # Force kill stale process
+# ── Sanitization & heartbeat (2 commands) ──────────────────────────────
+node phase-state.js sanitize <file>                     # Redact secrets (uses matchAll for accuracy)
+node phase-state.js heartbeat [phaseId] [taskId] [status] [note]  # Write heartbeat
+
+# ── Plan integrity — P2-1 (6 commands) ─────────────────────────────────
+node phase-state.js detect-plan-tier <plan-file>        # Detect plan tier (1/2/3/3.5) + needsConvert
+node phase-state.js plan-validate <plan-file>          # Validate plan format + return issues
+node phase-state.js plan-backup <plan-file>            # Backup plan to <file>.orig.<ts>.md
+node phase-state.js plan-diff <orig-json> <new-json>   # Compare task count (exit 0 if delta=0)
+node phase-state.js transform-tier2 <text>              # Convert Tier 3.5自由 Markdown → Tier 2 JSON
+node phase-state.js set-task-deadline <id> <isoTime>   # Write taskDeadline to state.json + heartbeat.json
+
+# ── Timeout & audit — P0-1/P1-1 (2 commands) ────────────────────────
+node phase-state.js compute-timeout [complexity] [attempt]  # Weighted timeout (1-5 complexity × 1-3 attempt)
+node phase-state.js get-audit-default                  # Output audit default (on|off, P1-1)
+
+# ── Workspace & recovery — atdo-001/003 (2 commands) ────────────────────
+node phase-state.js check-workspace                   # Verify workspace readiness (atdo-001)
+node phase-state.js proxy-recovery-decision <id> <auto-pass|manual-required>  # Proxy mode decision (atdo-003)
+
+# ── Directory config (2 commands) ───────────────────────────────────────
+node phase-state.js set-project-dirs                  # Configure project temp dirs
+node phase-state.js get-project-dirs                 # Query project dir config
+
+# ── Watchdog (3 commands) ──────────────────────────────────────────────
+bash scripts/watchdog.sh cleanup                   # Kill orphan gsd- agent processes
+bash scripts/watchdog.sh check-heartbeat          # Check heartbeat timeout (warn/strike/kill)
+bash scripts/watchdog.sh kill-stale <pid>         # Force kill stale orchestrator process
+
+# ── Test wrappers (4 commands) ──────────────────────────────────────────
+bash scripts/test.sh                    # Full test suite (--test-timeout=60000, ~30s)
+bash scripts/test-unit.sh [--test-name-pattern=...]  # Unit tests only (--test-timeout=30000, ~10s)
+bash scripts/test-integration.sh        # Integration tests only (--test-timeout=60000)
+bash scripts/test-cleanup.sh            # Clean .phase-execution/残留 + orphan processes
 ```
 
 ## Final Report Template

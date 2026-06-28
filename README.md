@@ -121,8 +121,8 @@ node tests/atdo.test.js          # 直接跑(debug 时)
 
 | 项目 | 数量 |
 |------|------|
-| 测试套件 | 63 |
-| 测试用例 | 282 |
+| 测试套件 | 88 |
+| 测试用例 | 398 |
 | 通过率 | 100% |
 
 覆盖:init / get / set-phase / get-current-phase / inc-strike / get-strikes / record-commit / record-confirm / has-confirm / validate-summary / generate-summary-template / compare-plan-hash / lock / unlock / check-disk / check-lock-age / sanitize / heartbeat / summary / backup rotation / E2E 完整流程 + P1-2(record-commit HEAD 解析)+ P1-4(verification phase type)+ 9 个安全注入回归(路径穿越、命令注入、LLM 幻觉、敏感文件检测、P2 6 项加固)+ v2.0.x P2/P3 微修复(parseDfOutput / writeState 备份 / watchdog 守护 / 模板字段 / inc-strike ALERT 触发)+ B-01(get-current-phase phaseType) + B-02(set-phase verified 守卫)。
@@ -231,9 +231,9 @@ git config --unset core.hooksPath
 ## 文件清单
 
 ```
-SKILL.md                                   # 主编排器(1680 行)
-scripts/phase-state.js                     # 19 个状态管理命令(1362 行,零依赖)
-scripts/watchdog.sh                        # 孤儿进程清理 + 心跳检查(186 行)
+SKILL.md                                   # 主编排器(2432 行)
+scripts/phase-state.js                     # 37 个状态管理命令(2346 行,零依赖)
+scripts/watchdog.sh                        # 孤儿进程清理 + 心跳检查(294 行)
 references/templates/
 ├── audit-report-template.md               # 审计报告模板
 └── integration-test-report-template.md    # 集成测试报告模板

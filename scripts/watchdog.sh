@@ -125,9 +125,28 @@ check_heartbeat() {
   diff_sec=$((now_sec - hb_sec))
 
   # P0-1:优先读 taskDeadline(若有)→ 相对阈值;否则用 fallback 绝对值 5/10/15 min
-  local warn_threshold strike_threshold kill_threshold use_relative
+  local warn_threshold strike_threshold kill_threshold use_relative gate_substep_timeout=false
   use_relative=false
+
+  # atdo-GCR-01:Gate 子步骤超时感知(gate_substep 优先级最高,覆盖 taskDeadline 和 fallback)
   if [ -s "$HEARTBEAT_FILE" ]; then
+    gate_substep=$(node -e "try{process.stdout.write(require('./$HEARTBEAT_FILE').currentGateSubstep||'')}catch{}" 2>/dev/null || echo "")
+    if [ -n "$gate_substep" ]; then
+      case "$gate_substep" in
+        gate-integration-test) warn_threshold=120; strike_threshold=360; kill_threshold=600; gate_substep_timeout=true ;;  # 2/6/10 min
+        gate-code-review)      warn_threshold=300; strike_threshold=600; kill_threshold=900; gate_substep_timeout=true ;;   # 5/10/15 min
+        gate-fix)             warn_threshold=120; strike_threshold=360; kill_threshold=600; gate_substep_timeout=true ;;  # 2/6/10 min
+        gate-commit)          warn_threshold=30; strike_threshold=60; kill_threshold=120; gate_substep_timeout=true ;;     # 30s/1/2 min
+        *)                    gate_substep_timeout=false ;;
+      esac
+      if [ "$gate_substep_timeout" = "true" ]; then
+        echo "[watchdog] gate 子步骤: ${gate_substep},超时阈值 warn=${warn_threshold}s strike=${strike_threshold}s kill=${kill_threshold}s"
+      fi
+    fi
+  fi
+
+  # taskDeadline 相对阈值(gate_substep 存在时跳过)
+  if [ "$gate_substep_timeout" = "false" ] && [ -s "$HEARTBEAT_FILE" ]; then
     local task_deadline_sec
     task_deadline_sec=$(node -e "try{const d=require('./$HEARTBEAT_FILE').taskDeadline;if(!d)process.exit(1);process.stdout.write(String(Math.floor(new Date(d).getTime()/1000)))}catch{process.exit(1)}" 2>/dev/null || echo "0")
     if [ -n "$task_deadline_sec" ] && [ "$task_deadline_sec" -gt 0 ]; then
@@ -185,7 +204,17 @@ action_strike() {
   local current_phase
   current_phase=$(node -e "try{const s=require('./$STATE_FILE');process.stdout.write(s.phases?.[s.currentPhaseIndex]?.number||'')}catch{process.stdout.write('')}" 2>/dev/null || echo "")
   if [ -n "$current_phase" ]; then
-    node "$phase_state_bin" inc-strike "$current_phase" "$STRIKE_KIND" 2>&1 | tail -1 || true
+    # P0-D fix: 用 set +e 临时禁用 exit-on-error,让 inc-strike die 时 watchdog 仍感知
+    set +e
+    local strike_result
+    strike_result=$(node "$phase_state_bin" inc-strike "$current_phase" "$STRIKE_KIND" 2>&1)
+    local strike_exit=$?
+    set -e
+    if [ $strike_exit -ne 0 ]; then
+      echo "[watchdog] [WARN] inc-strike 失败(exit $strike_exit): $strike_result"
+    else
+      echo "[watchdog] strike 写入: $(echo "$strike_result" | tail -1)"
+    fi
   else
     echo "[watchdog] [WARN] 无法读 currentPhaseIndex,跳过 strike 写入"
   fi
@@ -217,6 +246,8 @@ action_kill() {
   fi
   # 清 heartbeat(避免下一轮立刻再次 kill)
   rm -f "$HEARTBEAT_FILE" 2>/dev/null || true
+  # 清 lock(避免下一轮 watchdog 误判 stale)
+  rm -f "$LOCK_FILE" 2>/dev/null || true
 }
 
 # ─── 强制终止 ───────────────────────────────────────────
