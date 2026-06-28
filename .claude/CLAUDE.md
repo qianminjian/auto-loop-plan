@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目身份
 
-这是一个 **Claude Code Skill**（`/atdo`），不是传统应用。核心产物是 `SKILL.md`（1680 行编排器协议）+ `scripts/phase-state.js`（1362 行零依赖状态机）+ `scripts/watchdog.sh`（进程监控）。
+这是一个 **Claude Code Skill**（`/atdo`），不是传统应用。核心产物是 `SKILL.md`（2432 行编排器协议）+ `scripts/phase-state.js`（2346 行零依赖状态机）+ `scripts/watchdog.sh`（294 行进程监控）。
 
 零外部依赖，纯 Node.js 内置模块 + Bash。无须 `npm install`，无须 build。
 
@@ -58,9 +58,9 @@ shellcheck scripts/*.sh
 
 | 文件 | 行数 | 角色 |
 |------|------|------|
-| `SKILL.md` | 1680 | 编排器协议 —— Claude Code 加载后按此执行 phase loop |
-| `scripts/phase-state.js` | 1457 | 状态机 —— 24 个命令（含 `check-test-runtime`），读写 `.phase-execution/state.json` |
-| `scripts/watchdog.sh` | 187 | 看门狗 —— 孤儿进程清理 + 心跳检查 + 僵死进程终止 |
+| `SKILL.md` | 2432 | 编排器协议 —— Claude Code 加载后按此执行 phase loop |
+| `scripts/phase-state.js` | 2346 | 状态机 —— 24 个命令（含 `check-test-runtime`），读写 `.phase-execution/state.json` |
+| `scripts/watchdog.sh` | 294 | 看门狗 —— 孤儿进程清理 + 心跳检查 + 僵死进程终止 |
 
 ### 关键设计原则
 

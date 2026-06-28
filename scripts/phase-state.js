@@ -142,11 +142,16 @@ function atomicWrite(filepath, data) {
   ensureDir();
   const json = JSON.stringify(data, null, 2);
   const tmpPath = path.join(STATE_DIR, `${TMP_PREFIX}.${process.pid}.${Date.now()}`);
-  fs.writeFileSync(tmpPath, json, 'utf8');
-  const fd = fs.openSync(tmpPath, 'r+');
-  fs.fsyncSync(fd);
-  fs.closeSync(fd);
-  fs.renameSync(tmpPath, filepath);
+  try {
+    fs.writeFileSync(tmpPath, json, 'utf8');
+    const fd = fs.openSync(tmpPath, 'r+');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fs.renameSync(tmpPath, filepath);
+  } catch (e) {
+    try { fs.unlinkSync(tmpPath); } catch {}
+    throw e;
+  }
 }
 
 // 核心读取逻辑：读主文件 + 备份回退，失败返回 null。供 readState/readStateSafe 复用
@@ -281,33 +286,56 @@ function sanitize(text) {
 
 function acquireLock() {
   ensureDir();
-  if (fs.existsSync(LOCK_FILE)) {
-    const lock = readJSON(LOCK_FILE);
-    if (lock) {
-      // P1-C: 验证 lock.pid 是正整数,防止恶意 lock 文件触发 execSync 命令注入
-      //      即使将来 process.kill 兜底失效(版本升级/类型放宽),也确保不传字符串到 shell
-      const pidValid = typeof lock.pid === 'number' && Number.isInteger(lock.pid) && lock.pid > 0;
-      if (pidValid) {
-        const isAlive = (() => {
-          try { process.kill(lock.pid, 0); return true; } catch { return false; }
-        })();
-        if (isAlive && lock.hostname === os.hostname()) {
-          // 检查进程是否是 claude/node — 用 execFileSync 不走 shell,参数化传递
-          try {
-            const { execFileSync } = require('child_process');
-            const cmdline = execFileSync('ps', ['-o', 'comm=', '-p', String(lock.pid)], { encoding: 'utf8', timeout: 2000 }).trim();
-            if (cmdline.includes('claude') || cmdline.includes('node')) {
-              die(`编排器已在运行 (pid ${lock.pid}, 启动于 ${lock.startTime})`);
-            }
-          } catch {}
+  // P0-H fix: 用 O_EXCL 原子创建锁文件,避免多进程并发时的 writeFileSync 竞态
+  // O_EXCL:若文件已存在则失败(EEXIST),保证原子性
+  let fd;
+  try {
+    fd = fs.openSync(LOCK_FILE, 'wx');
+  } catch (e) {
+    if (e.code === 'EEXIST') {
+      // 锁已存在 —— 检查是否 stale(进程已死/不同主机/锁内容损坏)
+      let shouldDelete = false;
+      const lock = readJSON(LOCK_FILE);
+      if (lock) {
+        const pidValid = typeof lock.pid === 'number' && Number.isInteger(lock.pid) && lock.pid > 0;
+        if (pidValid) {
+          const isAlive = (() => {
+            try { process.kill(lock.pid, 0); return true; } catch { return false; }
+          })();
+          if (isAlive && lock.hostname === os.hostname()) {
+            try {
+              const { execFileSync } = require('child_process');
+              const cmdline = execFileSync('ps', ['-o', 'comm=', '-p', String(lock.pid)], { encoding: 'utf8', timeout: 2000 }).trim();
+              if (cmdline.includes('claude') || cmdline.includes('node')) {
+                die(`编排器已在运行 (pid ${lock.pid}, 启动于 ${lock.startTime})`);
+              }
+            } catch {}
+          }
+          // stale lock (进程已死或不同主机) — 标记删除
+          process.stderr.write(`[phase-state] 检测到残留锁 (pid ${lock.pid} 已不存在),自动清理后重新获取\n`);
+          shouldDelete = true;
         } else {
-          // stale lock (PID 已死)或不同主机 — 允许覆盖
-          process.stderr.write(`[phase-state] 检测到残留锁 (pid ${lock.pid} 已不存在)，自动清理\n`);
+          // pid 无效(损坏或攻击构造) — 标记删除
+          process.stderr.write(`[phase-state] 锁文件损坏(pid 无效),自动清理\n`);
+          shouldDelete = true;
         }
       } else {
-        // pid 无效(损坏或攻击构造) — 静默清理后重新获取
-        process.stderr.write(`[phase-state] 锁文件损坏(pid 无效),自动清理\n`);
+        // 锁内容损坏(JSON 解析失败) — 标记删除
+        process.stderr.write(`[phase-state] 锁文件损坏(非 JSON),自动清理\n`);
+        shouldDelete = true;
       }
+      // P0-H fix: 必须删除 existing file 后才能重试 O_EXCL
+      if (shouldDelete) {
+        try { fs.unlinkSync(LOCK_FILE); } catch {}
+      }
+      // 重试原子创建
+      try {
+        fd = fs.openSync(LOCK_FILE, 'wx');
+      } catch (e2) {
+        die(`无法获取锁(已存在且清理后重试仍失败): ${e2.message}`);
+      }
+    } else {
+      die(`无法创建锁文件: ${e.message}`);
     }
   }
   const lock = {
@@ -315,12 +343,14 @@ function acquireLock() {
     startTime: new Date().toISOString(),
     hostname: os.hostname(),
   };
-  fs.writeFileSync(LOCK_FILE, JSON.stringify(lock, null, 2), 'utf8');
+  fs.writeSync(fd, JSON.stringify(lock, null, 2), 'utf8');
+  fs.fsyncSync(fd);
+  fs.closeSync(fd);
   return lock;
 }
 
 function releaseLock() {
-  try { fs.unlinkSync(LOCK_FILE); } catch {}
+  try { fs.unlinkSync(LOCK_FILE); } catch (e) { console.error(`[phase-state] releaseLock 失败: ${e.message}`); }
 }
 
 // ─── 磁盘检查 ───────────────────────────────────────────
@@ -335,7 +365,7 @@ function checkDisk(minMB = 500) {
     const df = execFileSync('df', ['-P', '.'], { encoding: 'utf8' });
     return parseDfOutput(df, minMB);
   } catch (e) {
-    return { ok: false, note: '无法检查磁盘空间，跳过', error: e.message };
+    die(`磁盘空间检查失败: ${e.message}`);
   }
 }
 
@@ -352,7 +382,7 @@ function parseDfOutput(dfOutput, minMB = 500) {
   //   Filesystem    512-blocks      Used  Available Capacity iused      iused%  Mounted on
   //   /dev/disk1s5  976490576 312345678 175899610    64% ...
   const lines = dfOutput.trim().split('\n');
-  if (lines.length < 2) return { ok: false, note: 'df 输出格式异常,跳过', error: 'lines < 2' };
+  if (lines.length < 2) die('df 输出格式异常(少于2行)');
   const parts = lines[1].trim().split(/\s+/);
   // -P 模式:Available 在第 4 列(parts[3])
   // macOS / 部分 Unix:Available 在第 4 列(parts[3])但 block size 不同
@@ -360,7 +390,7 @@ function parseDfOutput(dfOutput, minMB = 500) {
   // 用 fallback 兼容两种模式
   const available = parseInt(parts[3] || parts[2], 10);
   if (Number.isNaN(available)) {
-    return { ok: false, note: 'df 输出无法解析,跳过', error: `parts: ${JSON.stringify(parts)}` };
+    die(`df 输出无法解析可用空间(parts: ${JSON.stringify(parts)})`);
   }
   if (available < minMB) {
     die(`磁盘可用空间不足: ${available}MB < ${minMB}MB`);
@@ -1085,13 +1115,19 @@ function cmdSanitize() {
   const content = fs.readFileSync(filepath, 'utf8');
   const sanitized = sanitize(content);
   // P2-14: SKILL.md 协议 L1256 要求 sanitize 写 securityEvents 到 state.json
-  // 算法:数原文中 SECRET_PATTERNS 命中总数(replace 命中)
+  // 算法:数原文中 SECRET_PATTERNS 命中总数(matchAll 避免 capture group 导致 match.length 异常)
   let secretsFound = 0;
   if (sanitized !== content) {
     for (const pattern of SECRET_PATTERNS) {
-      // match 可能 null(无匹配);global flag 影响 matchAll 但不改变 match
-      const matches = content.match(pattern) || [];
-      secretsFound += matches.length;
+      // P0-I fix: 用 matchAll() 替代 match()——带 capture group 的 pattern
+      // (如 API_KEY / PASSWORD 赋值) 用 match() 会把 group 算进 length,导致多计
+      // matchAll() 返回 iterator,展开后取 length 才是真正的 match 次数
+      try {
+        const matches = [...content.matchAll(pattern)];
+        secretsFound += matches.length;
+      } catch {
+        // 无效 regex(如 Unicode property escape 在旧 Node)时安全降级
+      }
     }
     fs.writeFileSync(filepath, sanitized, 'utf8');
     // 写 state.json.securityEvents — 容忍 state.json 不存在(无 state 时跳过,不让 sanitize 命令强制 init)
@@ -1651,6 +1687,12 @@ function cmdPlanBackup() {
   const planFile = args[0];
   if (!planFile) die('plan-backup 需要 plan 文件路径作为参数');
   if (planFile === '-') die('plan-backup 不支持 stdin 模式(无法备份,要求传文件路径)');
+  // 路径穿越防护:只允许备份 cwd 内的文件,防止 ../../etc/passwd 等攻击
+  const cwdReal = fs.realpathSync(process.cwd());
+  const planResolved = path.resolve(planFile);
+  if (!planResolved.startsWith(cwdReal + path.sep)) {
+    die(`plan-backup: 目标路径 "${planResolved}" 不在 cwd "${cwdReal}" 内,拒绝备份`);
+  }
   if (!fs.existsSync(planFile)) die(`plan-backup: 文件不存在 "${planFile}"`);
   // ISO 时间戳,文件名安全字符(替换 : . -)
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
@@ -2064,9 +2106,19 @@ function cmdAdvancePhase() {
   }
 
   // 默认终点按 gateType 决策（F3 修订）
+  // P0-A fix: 优先检查 isGate——
+  // is_gate:true 的 phase 必须经过 gate_review 子状态,不能绕过 Step 7.5 直接推 completed
+  // 但若 phase 已到达 gated 或更后(gated/completed),不再尝试推 gate_review
   if (!targetStatus) {
-    const gateType = phase.gateType || 'auto';
-    targetStatus = (gateType === 'manual' || gateType === 'hybrid') ? 'gated' : 'completed';
+    const isGatePhase = !!(phase.isGate || phase.is_gate);
+    // gate_review 只能从 fixed 进入(BUG FIX:若已在 gated 则不适用)
+    const atOrPastGateReview = phase.status === 'gated' || phase.status === 'completed';
+    if (isGatePhase && !atOrPastGateReview) {
+      targetStatus = 'gate_review';
+    } else {
+      const gateType = phase.gateType || 'auto';
+      targetStatus = (gateType === 'manual' || gateType === 'hybrid') ? 'gated' : 'completed';
+    }
   }
 
   // 校验 targetStatus

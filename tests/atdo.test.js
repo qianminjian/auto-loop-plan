@@ -5031,11 +5031,11 @@ describe('P0-1: Task Timeout & Heartbeat Protocol', () => {
         assert.match(r.stderr, /stdin/);
       });
 
-      test('文件不存在 → die', () => {
+      test('路径在 cwd 外 → die(拒绝跨路径备份)', () => {
         const r = spawnSync('node', [phaseStatePath, 'plan-backup', '/nonexistent/file.md'],
           { encoding: 'utf8' });
         assert.equal(r.status, 1);
-        assert.match(r.stderr, /不存在/);
+        assert.match(r.stderr, /不在 cwd/);
       });
     });
 

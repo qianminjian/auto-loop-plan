@@ -204,7 +204,17 @@ action_strike() {
   local current_phase
   current_phase=$(node -e "try{const s=require('./$STATE_FILE');process.stdout.write(s.phases?.[s.currentPhaseIndex]?.number||'')}catch{process.stdout.write('')}" 2>/dev/null || echo "")
   if [ -n "$current_phase" ]; then
-    node "$phase_state_bin" inc-strike "$current_phase" "$STRIKE_KIND" 2>&1 | tail -1 || true
+    # P0-D fix: 用 set +e 临时禁用 exit-on-error,让 inc-strike die 时 watchdog 仍感知
+    set +e
+    local strike_result
+    strike_result=$(node "$phase_state_bin" inc-strike "$current_phase" "$STRIKE_KIND" 2>&1)
+    local strike_exit=$?
+    set -e
+    if [ $strike_exit -ne 0 ]; then
+      echo "[watchdog] [WARN] inc-strike 失败(exit $strike_exit): $strike_result"
+    else
+      echo "[watchdog] strike 写入: $(echo "$strike_result" | tail -1)"
+    fi
   else
     echo "[watchdog] [WARN] 无法读 currentPhaseIndex,跳过 strike 写入"
   fi
@@ -236,6 +246,8 @@ action_kill() {
   fi
   # 清 heartbeat(避免下一轮立刻再次 kill)
   rm -f "$HEARTBEAT_FILE" 2>/dev/null || true
+  # 清 lock(避免下一轮 watchdog 误判 stale)
+  rm -f "$LOCK_FILE" 2>/dev/null || true
 }
 
 # ─── 强制终止 ───────────────────────────────────────────
